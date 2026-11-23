@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="theme-color" content="#F8F5FF" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#110B24" media="(prefers-color-scheme: dark)">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>First Dibs: UK apprenticeship alerts</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Shown until config.js has real values -->
+<div class="gate" id="setup" hidden>
+  <h1 class="mark">First Dibs</h1>
+  <div class="panel"><h3>One step left</h3>
+  <p class="lede" style="margin:6px 0 0">Open <strong>config.js</strong> and paste in your Supabase project URL and anon key, then upload the site again.</p></div>
+</div>
+
+<!-- Sign in -->
+<div class="gate" id="auth" hidden>
+  <h1 class="mark">First Dibs</h1>
+  <p class="lede">New apprenticeships in your sectors, emailed to you as they’re posted.</p>
+  <div class="panel">
+    <label class="field" style="margin-top:0"><span>Email</span><input type="email" id="authEmail" autocomplete="email"></label>
+    <label class="field"><span>Password</span><input type="password" id="authPass" autocomplete="current-password"></label>
+    <div class="row" style="margin-top:14px"><button class="btn go" data-act="signin">Sign in</button><button class="btn" data-act="signup">Create account</button></div>
+    <p class="state" id="authMsg" style="margin:10px 0 0" aria-live="polite"></p>
+  </div>
+</div>
+
+<!-- The app -->
+<div class="wrap" id="app" hidden>
+  <header class="top">
+    <h1 class="mark">First Dibs</h1>
+    <div>
+      <p class="pulse" id="pulse"><i></i><span id="pulseText"></span></p>
+      <p class="who-am-i"><span id="whoami"></span><button data-act="signout">Sign out</button></p>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button role="tab" data-tab="board" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg>Board<span class="count" id="cBoard"></span></button>
+    <button role="tab" data-tab="apps" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16 9.5"/></svg>Applications<span class="count" id="cApps"></span></button>
+    <button role="tab" data-tab="profile" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.200 1.900 7 5.500"/></svg>Profile</button>
+    <button role="tab" data-tab="settings" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h9M17 8h3M4 16h3M11 16h9"/><circle cx="15" cy="8" r="2"/><circle cx="9" cy="16" r="2"/></svg>Settings</button>
+  </nav>
+
+  <section id="tab-board">
+    <div class="hero">
+      <p class="eyebrow">Your search</p>
+      <h2 id="heroLine">Your board</h2>
+      <p class="lede" id="searchSum"></p>
+      <div class="row"><button class="btn go" id="checkBtn" data-act="check">Check now</button><button class="btn" data-act="goSettings">Change criteria</button></div>
+      <p class="progress" id="progress" aria-live="polite"></p>
+      <ul class="stats">
+        <li><b id="stNew">0</b>New</li><li><b id="stShort">0</b>Shortlisted</li><li><b id="stApplied">0</b>Applied</li><li><b id="stClosing">0</b>Closing this week</li>
+      </ul>
+    </div>
+    <div class="chips" id="viewChips" style="margin-bottom:14px"></div>
+    <div id="list"></div>
+  </section>
+
+  <section id="tab-apps" hidden>
+    <h2>Your applications</h2>
+    <p class="lede">Everything you’ve shortlisted or sent, soonest closing date first.</p>
+    <ul class="tally" id="tally"></ul>
+    <div class="panel" id="appList"></div>
+  </section>
+
+  <section id="tab-profile" hidden>
+    <h2>Your profile</h2>
+    <p class="lede">“Apply with Claude” sends your CV and these notes to Claude along with the job description. Claude is told to use only what’s here.</p>
+    <div class="panel">
+      <label class="field" style="margin-top:0"><span>Your name</span><input type="text" data-p="full_name" autocomplete="name"></label>
+      <div class="field"><span>Your CV</span>
+        <div class="row"><label class="btn" for="cvFile">Upload your CV</label><input class="vh" type="file" id="cvFile" accept=".pdf,.docx,.txt,.md,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"><span class="state" id="cvState"></span></div>
+        <small>PDF, Word (.docx) or plain text. The text is kept below so you can fix anything that came out wrong.</small>
+        <textarea data-p="cv_text" id="cvText" aria-label="CV text" style="min-height:220px;margin-top:8px" placeholder="Or paste the text of your CV here."></textarea>
+      </div>
+      <label class="field"><span>Anything true that isn’t on your CV</span><textarea data-p="notes" placeholder="Predicted grades, a project you’re proud of, why you want an apprenticeship…"></textarea></label>
+      <p class="state" id="saveState" style="margin:10px 0 0" aria-live="polite"></p>
+    </div>
+  </section>
+
+  <section id="tab-settings" hidden>
+    <h2>What to look for</h2>
+    <p class="lede">You’re emailed when a new vacancy matches all of these.</p>
+    <div class="panel">
+      <div class="field" style="margin-top:0"><span>Categories</span><div class="chips" id="sectorChips"></div></div>
+      <div class="field"><span>Level</span><div class="chips" id="levelChips"></div><small>Leave all off for any level.</small></div>
+      <div class="field"><span>Where</span>
+        <div class="range"><input type="text" data-p="location" data-note="critState" placeholder="Town or postcode" aria-label="Town or postcode">
+        <select data-p="distance" data-num="1" data-note="critState" aria-label="Distance">
+          <option value="5">5 miles</option><option value="10">10 miles</option><option value="15">15 miles</option><option value="20">20 miles</option><option value="30">30 miles</option><option value="40">40 miles</option>
+        </select></div>
+        <small>Leave the town empty to search all of England.</small></div>
+      <label class="field"><span>Only if it mentions</span><input type="text" data-p="keywords" data-note="critState" placeholder="software, cyber, data">
+        <small>Optional. Separate words with commas; a vacancy needs at least one in its title, course or employer.</small></label>
+      <p class="state" id="critState" style="margin:10px 0 0" aria-live="polite"></p>
+    </div>
+
+    <h2 style="margin-top:22px">Email alerts</h2>
+    <div class="panel">
+      <div class="switch"><div><h3>Email me new matches</h3><p>Sent to the address you signed up with, after each check that finds something new.</p></div>
+      <input type="checkbox" data-p="email_alerts" data-note="critState" aria-label="Email me new matches"></div>
+    </div>
+
+    <h2 style="margin-top:22px">Sites it checks</h2>
+    <p class="lede">The scraper reads these every 15 minutes, whether or not you have this page open.</p>
+    <div class="panel">
+      <div id="siteList"></div>
+      <div class="field"><span>Add a site</span>
+        <div class="two"><input type="text" id="siteName" placeholder="Name, such as Rolls-Royce early careers" aria-label="Site name">
+        <input type="text" id="siteUrl" placeholder="https://…" aria-label="Site address" inputmode="url" autocapitalize="off"></div>
+        <small>Paste the page that lists the vacancies. You’re alerted whenever a new link appears on it.</small>
+        <div class="row" style="margin-top:8px"><button class="btn go" data-act="siteAdd">Add site</button></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div id="toast" hidden role="status"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
