@@ -25,9 +25,9 @@
   <div class="panel">
     <h3 id="authTitle">Sign in</h3>
     <label class="field" id="nameField" hidden><span>Full name</span><input type="text" id="authName" autocomplete="name"></label>
-    <label class="field" id="postcodeField" hidden><span>Postcode</span><input type="text" id="authPostcode" autocomplete="postal-code" autocapitalize="characters" placeholder="e.g. TN34 1AA"><small>Used to show how far each vacancy is from you.</small></label>
-    <label class="field"><span>Email</span><input type="email" id="authEmail" autocomplete="email"></label>
-    <label class="field"><span>Password</span><input type="password" id="authPass" autocomplete="current-password"><small id="passHint" hidden>At least 8 characters.</small></label>
+    <label class="field" id="postcodeField" hidden><span>Postcode</span><input type="text" id="authPostcode" autocomplete="postal-code" autocapitalize="characters" placeholder="e.g. SW1A 1AA"><small>Used to show how far each vacancy is from you.</small></label>
+    <label class="field" id="emailField"><span>Email</span><input type="email" id="authEmail" autocomplete="email"></label>
+    <label class="field" id="passField"><span>Password</span><input type="password" id="authPass" autocomplete="current-password"><small id="passHint" hidden>At least 8 characters.</small></label>
     <div class="row" style="margin-top:16px"><button class="btn go" id="authBtn" data-act="authGo">Sign in</button></div>
     <p class="state" id="authMsg" style="margin:10px 0 0" aria-live="polite"></p>
   </div>
@@ -96,7 +96,7 @@
     <p class="lede">“Apply with Claude” sends your CV and these notes to Claude along with the job description. Claude is told to use only what’s here.</p>
     <div class="panel">
       <label class="field" style="margin-top:0"><span>Your name</span><input type="text" data-p="full_name" autocomplete="name"></label>
-      <label class="field"><span>Your postcode</span><input type="text" data-p="postcode" autocomplete="postal-code" autocapitalize="characters" placeholder="e.g. TN34 1AA">
+      <label class="field"><span>Your postcode</span><input type="text" data-p="postcode" autocomplete="postal-code" autocapitalize="characters" placeholder="e.g. SW1A 1AA">
         <small>Used to show how far each vacancy is from you, and to sort by distance. It isn’t shared with employers.</small></label>
       <div class="field"><span>Your CV</span>
         <div class="row"><label class="btn" for="cvFile">Upload your CV</label><input class="vh" type="file" id="cvFile" accept=".pdf,.docx,.txt,.md,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"><span class="state" id="cvState"></span></div>
@@ -105,6 +105,11 @@
       </div>
       <label class="field"><span>Anything true that isn’t on your CV</span><textarea data-p="notes" placeholder="Predicted grades, a project you’re proud of, why you want an apprenticeship…"></textarea></label>
       <p class="state" id="saveState" style="margin:10px 0 0" aria-live="polite"></p>
+    </div>
+    <div class="panel">
+      <h3>Delete my account</h3>
+      <p class="lede" style="margin:6px 0 12px">Removes your profile, CV, shortlist, notes and added sites for good. This can’t be undone.</p>
+      <button class="btn danger" data-act="deleteAccount">Delete my account</button>
     </div>
   </section>
 
@@ -119,9 +124,11 @@
         <select data-p="distance" data-num="1" data-note="critState" aria-label="Distance">
           <option value="5">5 miles</option><option value="10">10 miles</option><option value="15">15 miles</option><option value="20">20 miles</option><option value="30">30 miles</option><option value="40">40 miles</option>
         </select></div>
-        <small>Leave the town empty to search all of England.</small></div>
+        <small>Leave the town empty to search all of England. <button type="button" class="linkbtn" data-act="usePostcode">Use my postcode</button></small></div>
       <label class="field"><span>Only if it mentions</span><input type="text" data-p="keywords" data-note="critState" placeholder="software, cyber, data">
         <small>Optional. Separate words with commas; a vacancy needs at least one in its title, course or employer.</small></label>
+      <label class="field"><span>Minimum pay</span><input type="text" inputmode="numeric" data-p="min_salary" data-num="1" data-note="critState" placeholder="e.g. 18000">
+        <small>Pounds a year. Leave empty for any. Vacancies that don’t state their pay are still included.</small></label>
       <p class="state" id="critState" style="margin:10px 0 0" aria-live="polite"></p>
     </div>
 
@@ -129,12 +136,18 @@
     <div class="panel">
       <div class="switch"><div><h3>Email me new matches</h3><p>Sent to the address you signed up with, after each check that finds something new.</p></div>
       <input type="checkbox" data-p="email_alerts" data-note="critState" aria-label="Email me new matches"></div>
+      <div class="switch"><div><h3>Closing-soon reminders</h3><p>An email when something on your shortlist closes within three days.</p></div>
+      <input type="checkbox" data-p="reminders" data-note="critState" aria-label="Closing-soon reminders"></div>
+      <div class="switch"><div><h3>Weekly summary</h3><p>Every Monday morning: what’s new, what’s closing this week and where your applications stand.</p></div>
+      <input type="checkbox" data-p="weekly_summary" data-note="critState" aria-label="Weekly summary"></div>
     </div>
 
     <h2 style="margin-top:22px">Sites it checks</h2>
     <p class="lede">The scraper reads these every 2 hours, whether or not you have this page open.</p>
     <div class="panel">
       <div id="siteList"></div>
+      <div class="field"><span>Popular employers and boards</span><div class="chips" id="watchChips"></div>
+        <small>Tap to add or remove. You’re alerted when a new vacancy in your categories appears on that page.</small></div>
       <div class="field"><span>Add a site</span>
         <div class="two"><input type="text" id="siteName" placeholder="Name, such as Rolls-Royce early careers" aria-label="Site name">
         <input type="text" id="siteUrl" placeholder="https://…" aria-label="Site address" inputmode="url" autocapitalize="off"></div>

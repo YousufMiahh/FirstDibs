@@ -8,12 +8,24 @@ var SECTORS = [[1,"Agriculture, environment & animal care"],[2,"Business & admin
   [10,"Hair & beauty"],[11,"Health & science"],[12,"Legal, finance & accounting"],[13,"Protective services"],[14,"Sales & marketing"],[15,"Transport & logistics"]];
 var LEVELS = [[2,"Level 2 (GCSE)"],[3,"Level 3 (A level)"],[4,"Level 4"],[5,"Level 5"],[6,"Level 6 (degree)"],[7,"Level 7 (master’s)"]];
 var STATUSES = [["shortlisted","Shortlisted"],["applied","Applied"],["interview","Interview"],["offer","Offer"],["closed","Didn’t work out"]];
+// One-tap sites for Settings. Each address was checked to be readable by the scraper.
+var WATCHLIST = [
+  ["nhs", "NHS Jobs", "https://www.jobs.nhs.uk/candidate/search/results?keyword=apprentice&sort=publicationDateDesc"],
+  ["gmfj", "GetMyFirstJob", "https://www.getmyfirstjob.co.uk/search"],
+  ["reed", "Reed apprenticeships", "https://www.reed.co.uk/jobs/apprenticeship-jobs"],
+  ["wales", "Wales (government)", "https://findanapprenticeship.service.gov.wales/find-apprenticeship"],
+  ["rail", "Network Rail", "https://www.networkrail.co.uk/careers/early-careers/apprenticeships/"],
+  ["sky", "Sky", "https://careers.sky.com/earlycareers/apprenticeships/"],
+  ["bt", "BT Group", "https://jobs.bt.com/content/Apprentices/"],
+  ["kpmg", "KPMG", "https://www.kpmgcareers.co.uk/apprentice/"],
+  ["gchq", "GCHQ", "https://www.gchq-careers.co.uk/early-careers/apprenticeships.html"]
+];
 var PROMPT_LIMIT = 13000; // Claude Desktop cuts prefilled prompts at roughly 14,000 characters
 
 var CFG = window.FIRST_DIBS || {};
 var sb = null, user = null;
 var S = { profile: null, matches: [], sites: [], status: null };
-var ui = { tab: "board", view: "new", checking: false, authMode: "in", sort: "posted", level: "", within: "", q: "" };
+var ui = { tab: "board", view: "new", checking: false, authMode: "in", sort: "posted", level: "", within: "", q: "", recover: false, openNotes: {} };
 var GEO = {}; // postcode -> [lat, lon], or null when it can’t be found
 
 /* ---------- helpers ---------- */
@@ -81,10 +93,12 @@ async function boot() {
   if (!window.supabase || !CFG.url || /YOUR-/.test(CFG.url) || !CFG.key || /YOUR-/.test(CFG.key)) {
     show("setup", true); return;
   }
+  ui.recover = /type=recovery/.test(location.hash);
   sb = window.supabase.createClient(CFG.url, CFG.key);
   var got = await sb.auth.getSession();
   await enter(got.data && got.data.session ? got.data.session.user : null);
   sb.auth.onAuthStateChange(function (event, session) {
+    if (event === "PASSWORD_RECOVERY") { ui.recover = true; show("app", false); show("auth", true); setAuthMode("reset"); return; }
     var next = session ? session.user : null;
     if ((next && next.id) !== (user && user.id)) setTimeout(function () { enter(next); }, 0);
   });
@@ -92,7 +106,8 @@ async function boot() {
 async function enter(u) {
   user = u;
   show("auth", !u); show("app", !!u);
-  if (!u) { setAuthMode(ui.authMode); return; }
+  if (u && ui.recover) { show("app", false); show("auth", true); setAuthMode("reset"); return; }
+  if (!u) { setAuthMode(ui.authMode === "reset" ? "in" : ui.authMode); return; }
   $("whoami").textContent = u.email || "";
   await loadAll();
   var p = S.profile;
@@ -100,29 +115,46 @@ async function enter(u) {
 }
 function setAuthMode(mode) {
   ui.authMode = mode;
-  var up = mode === "up";
-  $("authTitle").textContent = up ? "Create your account" : "Sign in";
-  $("authBtn").textContent = up ? "Create account" : "Sign in";
-  $("nameField").hidden = !up;
-  $("postcodeField").hidden = !up;
-  $("passHint").hidden = !up;
-  $("authPass").setAttribute("autocomplete", up ? "new-password" : "current-password");
-  $("authSwitch").innerHTML = up ? 'Already have an account? <button type="button" data-act="authMode">Sign in</button>'
-    : 'New here? <button type="button" data-act="authMode">Create an account</button>';
+  var T = { "in": ["Sign in", "Sign in"], up: ["Create your account", "Create account"], forgot: ["Reset your password", "Email me a reset link"], reset: ["Choose a new password", "Save new password"] }[mode];
+  $("authTitle").textContent = T[0]; $("authBtn").textContent = T[1];
+  $("nameField").hidden = mode !== "up"; $("postcodeField").hidden = mode !== "up";
+  $("emailField").hidden = mode === "reset"; $("passField").hidden = mode === "forgot";
+  $("passHint").hidden = !(mode === "up" || mode === "reset");
+  $("authPass").setAttribute("autocomplete", mode === "in" ? "current-password" : "new-password");
+  $("authSwitch").innerHTML = mode === "in"
+    ? 'New here? <button type="button" data-act="authMode" data-id="up">Create an account</button><br><button type="button" data-act="authMode" data-id="forgot">Forgot your password?</button>'
+    : mode === "reset" ? "" : 'Already have an account? <button type="button" data-act="authMode" data-id="in">Sign in</button>';
   $("authMsg").className = "state"; $("authMsg").textContent = "";
-  (up ? $("authName") : $("authEmail")).focus();
+  (mode === "up" ? $("authName") : mode === "reset" ? $("authPass") : $("authEmail")).focus();
 }
 async function authGo() {
-  var up = ui.authMode === "up";
+  var mode = ui.authMode, up = mode === "up";
   var name = $("authName").value.trim().replace(/\s+/g, " ");
   var postcode = $("authPostcode").value.trim().toUpperCase().replace(/\s+/g, " ");
   var email = $("authEmail").value.trim(), pass = $("authPass").value, msg = $("authMsg");
   msg.className = "state"; msg.textContent = "";
   function bad(t) { msg.className = "state bad"; msg.textContent = t; }
   if (up && name.length < 2) return bad("Enter your full name.");
-  if (up && !validPostcode(postcode)) return bad("Enter a full UK postcode, like TN34 1AA.");
-  if (!/^\S+@\S+\.\S+$/.test(email)) return bad("Enter your email address.");
-  if (pass.length < 8) return bad("Use a password of at least 8 characters.");
+  if (up && !validPostcode(postcode)) return bad("Enter a full UK postcode, like SW1A 1AA.");
+  if (mode !== "reset" && !/^\S+@\S+\.\S+$/.test(email)) return bad("Enter your email address.");
+  if (mode !== "forgot" && pass.length < 8) return bad("Use a password of at least 8 characters.");
+  if (mode === "forgot") {
+    msg.textContent = "Sending…";
+    var fr = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + "/" });
+    if (fr.error) return bad(fr.error.message);
+    msg.textContent = "If that address has an account, a reset link is on its way. Check your inbox and spam folder.";
+    return;
+  }
+  if (mode === "reset") {
+    msg.textContent = "Saving…";
+    var rr = await sb.auth.updateUser({ password: pass });
+    if (rr.error) return bad(rr.error.message);
+    ui.recover = false; $("authPass").value = "";
+    try { history.replaceState(null, "", location.pathname); } catch (e) {}
+    var cur = await sb.auth.getSession();
+    user = null; await enter(cur.data && cur.data.session ? cur.data.session.user : null);
+    toast("Password changed"); return;
+  }
   msg.textContent = up ? "Creating your account…" : "Signing in…";
   var res = up
     ? await sb.auth.signUp({ email: email, password: pass, options: { data: { full_name: name, postcode: postcode } } })
@@ -166,10 +198,42 @@ function saveProfile(patch, note) {
   }, 500);
 }
 async function setStatus(listingId, status) {
-  S.matches.forEach(function (m) { if (m.listing_id === listingId) m.status = status; });
+  var patch = { status: status };
+  S.matches.forEach(function (m) {
+    if (m.listing_id !== listingId) return;
+    if (status === "applied" && !m.applied_at) patch.applied_at = new Date().toISOString().slice(0, 10);
+    Object.keys(patch).forEach(function (k) { m[k] = patch[k]; });
+  });
   render();
-  var res = await sb.from("matches").update({ status: status }).eq("user_id", user.id).eq("listing_id", listingId);
+  var res = await sb.from("matches").update(patch).eq("user_id", user.id).eq("listing_id", listingId);
   if (res.error) toast("Couldn’t save that change");
+}
+var matchT = {};
+function saveMatch(listingId, field, value) {
+  S.matches.forEach(function (m) { if (m.listing_id === listingId) m[field] = value; });
+  var key = listingId + "|" + field;
+  clearTimeout(matchT[key]);
+  matchT[key] = setTimeout(async function () {
+    var patch = {}; patch[field] = value;
+    var res = await sb.from("matches").update(patch).eq("user_id", user.id).eq("listing_id", listingId);
+    if (res.error) toast("Couldn’t save that");
+  }, 600);
+}
+async function deleteAccount(btn) {
+  if (btn.dataset.sure !== "1") { btn.dataset.sure = "1"; btn.textContent = "Press again to delete everything"; setTimeout(function () { btn.dataset.sure = ""; btn.textContent = "Delete my account"; }, 5000); return; }
+  btn.disabled = true; btn.textContent = "Deleting…";
+  var res = await sb.functions.invoke("scrape", { body: { action: "delete_account" } });
+  if (res.error || !(res.data && res.data.deleted)) { btn.disabled = false; btn.textContent = "Delete my account"; btn.dataset.sure = ""; toast("Couldn’t delete the account. Try again."); return; }
+  try { localStorage.removeItem("fd-geo"); } catch (e) {}
+  await sb.auth.signOut();
+  toast("Your account and data have been deleted");
+}
+async function testSite(url) {
+  var res = await sb.functions.invoke("scrape", { body: { action: "probe", url: url } });
+  var d = res.data || {};
+  if (res.error || !d.ok) return toast("Added, but " + (d.error ? d.error.charAt(0).toLowerCase() + d.error.slice(1) : "the page couldn’t be checked."));
+  if (!d.count) return toast("Added, but no links were found. That page probably loads its vacancies with JavaScript, which can’t be read.");
+  toast("Added. The page can be read: " + d.count + " links found.");
 }
 async function checkNow() {
   if (ui.checking) return;
@@ -284,7 +348,7 @@ function fillForms() {
   var p = S.profile; if (!p) return;
   document.querySelectorAll("[data-p]").forEach(function (el) {
     var v = p[el.dataset.p];
-    if (el.type === "checkbox") el.checked = !!v; else el.value = v == null ? "" : v;
+    if (el.type === "checkbox") el.checked = !!v; else el.value = (v == null || (el.dataset.p === "min_salary" && !Number(v))) ? "" : v;
   });
   if (p.cv_name && p.cv_text) $("cvState").textContent = "Using " + p.cv_name + ".";
 }
@@ -298,7 +362,8 @@ function visible() {
   var q = ui.q.trim().toLowerCase(), within = Number(ui.within) || 0, level = Number(ui.level) || 0;
   var rows = S.matches.filter(function (m) {
     var l = m.listing;
-    if (m.status === "hidden") return false;
+    if (ui.view === "hidden") { if (m.status !== "hidden") return false; }
+    else if (m.status === "hidden") return false;
     if (ui.view === "new" && m.status !== "new") return false;
     if (ui.view === "short" && ["shortlisted", "applied", "interview", "offer"].indexOf(m.status) < 0) return false;
     if (level && l.level !== level) return false;
@@ -333,7 +398,7 @@ function renderBoard() {
   put("stClosing", live.filter(function (m) { var c = closing(m.listing.closes); return c && c.soon && !/^Closed/.test(c.text); }).length);
   var hello = $("hello"); if (hello) { var fn = firstName(); hello.textContent = fn ? "Hello, " + fn : ""; hello.hidden = !fn; }
   put("heroLine", newCount ? newCount + " new apprenticeship" + (newCount > 1 ? "s" : "") + " found for you" : (S.matches.length ? "You’re up to date" : "Let’s find your first match"));
-  chipRow($("viewChips"), [["new", "New"], ["all", "Everything"], ["short", "Shortlist"]], function (id) { return ui.view === id; }, "view");
+  chipRow($("viewChips"), [["new", "New"], ["all", "Everything"], ["short", "Shortlist"], ["hidden", "Hidden"]], function (id) { return ui.view === id; }, "view");
   var names = (p.sectors || []).map(function (s) { return label(SECTORS, s); }).filter(Boolean);
   $("searchSum").textContent = names.length ? names.join(", ") + (p.location ? " within " + p.distance + " miles of " + p.location : " across England") : "You haven’t picked any categories yet.";
   var ls = visible(), el = $("list");
@@ -360,7 +425,8 @@ function renderBoard() {
       '<div class="row"><button class="btn go" data-act="apply" data-id="' + esc(l.id) + '">Apply with Claude</button>' +
       '<a class="btn" href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer" data-act="seen" data-id="' + esc(l.id) + '">Open listing</a>' +
       '<button class="btn star" data-act="star" data-id="' + esc(l.id) + '" aria-pressed="' + (m.status === "shortlisted" ? "true" : "false") + '">' + (m.status === "shortlisted" ? "Shortlisted" : "Shortlist") + "</button>" +
-      '<button class="btn quiet" data-act="hide" data-id="' + esc(l.id) + '">Not for me</button></div>' +
+      (m.status === "hidden" ? '<button class="btn" data-act="restore" data-id="' + esc(l.id) + '">Restore</button></div>'
+        : '<button class="btn quiet" data-act="hide" data-id="' + esc(l.id) + '">Not for me</button></div>') +
       '<div class="row" style="margin-top:4px"><button class="btn quiet" data-act="applyCopy" data-id="' + esc(l.id) + '">Copy the prompt instead</button>' +
       '<button class="btn quiet" data-act="applyWeb" data-id="' + esc(l.id) + '">Open in claude.ai</button></div></article>';
   }).join("");
@@ -377,7 +443,11 @@ function renderApps() {
     var l = m.listing, c = closing(l.closes);
     return '<div class="app"><div><h3>' + esc(l.title) + "</h3><p>" + esc(l.employer || "") + (c ? ". " + esc(c.text) + "." : "") + "</p>" +
       '<div class="row" style="margin-top:8px"><button class="btn" data-act="apply" data-id="' + esc(l.id) + '">Apply with Claude</button>' +
-      '<a class="btn quiet" href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer">Listing</a></div></div>' +
+      '<a class="btn quiet" href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer">Listing</a></div>' +
+      '<details class="more" data-notes="' + esc(l.id) + '"' + (ui.openNotes[l.id] ? " open" : "") + '><summary>Notes and dates' + ((m.notes || m.interview_at) ? " (saved)" : "") + '</summary>' +
+      '<div class="two"><label class="field"><span>Applied on</span><input type="date" data-m="applied_at" data-id="' + esc(l.id) + '" value="' + esc(m.applied_at || "") + '"></label>' +
+      '<label class="field"><span>Interview date</span><input type="date" data-m="interview_at" data-id="' + esc(l.id) + '" value="' + esc(m.interview_at || "") + '"></label></div>' +
+      '<label class="field"><span>Notes</span><textarea data-m="notes" data-id="' + esc(l.id) + '" placeholder="Who you spoke to, what you sent, what to chase…">' + esc(m.notes || "") + "</textarea></label></details></div>" +
       '<select data-status="' + esc(l.id) + '" aria-label="Status">' + STATUSES.map(function (s) { return '<option value="' + s[0] + '"' + (m.status === s[0] ? " selected" : "") + ">" + esc(s[1]) + "</option>"; }).join("") +
       '<option value="seen">Remove from list</option></select></div>';
   }).join("");
@@ -386,6 +456,8 @@ function renderSettings() {
   var p = S.profile || {};
   chipRow($("sectorChips"), SECTORS, function (id) { return (p.sectors || []).indexOf(Number(id)) > -1; }, "sector");
   chipRow($("levelChips"), LEVELS, function (id) { return (p.levels || []).indexOf(Number(id)) > -1; }, "level");
+  var wc = $("watchChips");
+  if (wc) chipRow(wc, WATCHLIST, function (id) { var w = WATCHLIST.filter(function (x) { return x[0] === id; })[0]; return S.sites.some(function (s) { return s.url === w[2]; }); }, "watch");
   var st = S.status;
   var faa = '<div class="switch"><div style="min-width:0"><h3>Find an apprenticeship (England)</h3><p class="url">findapprenticeship.service.gov.uk</p><p>' +
     (st && st.last_run ? "Checked " + esc(ago(st.last_run)) + ". " + (st.found || 0) + " vacancies read across everyone’s searches." + (st.error ? " Problem: " + esc(st.error) : "") : "Not checked yet.") +
@@ -413,7 +485,7 @@ document.addEventListener("click", async function (ev) {
   var el = ev.target.closest("[data-act]"); if (!el) return;
   var act = el.dataset.act, id = el.dataset.id, p = S.profile;
   if (act === "authGo") authGo();
-  else if (act === "authMode") setAuthMode(ui.authMode === "up" ? "in" : "up");
+  else if (act === "authMode") setAuthMode(id || "in");
   else if (act === "signout") { await sb.auth.signOut(); }
   else if (act === "check") checkNow();
   else if (act === "goSettings") setTab("settings");
@@ -425,7 +497,20 @@ document.addEventListener("click", async function (ev) {
   else if (act === "applyWeb") applyWithClaude(id, "web");
   else if (act === "seen") { var m = S.matches.filter(function (x) { return x.listing_id === id; })[0]; if (m && m.status === "new") setTimeout(function () { setStatus(id, "seen"); }, 300); }
   else if (act === "star") { var m2 = S.matches.filter(function (x) { return x.listing_id === id; })[0]; if (m2) setStatus(id, m2.status === "shortlisted" ? "seen" : "shortlisted"); }
-  else if (act === "hide") { setStatus(id, "hidden"); toast("Hidden"); }
+  else if (act === "hide") { setStatus(id, "hidden"); toast("Hidden. You can restore it from the Hidden view."); }
+  else if (act === "restore") { setStatus(id, "seen"); toast("Restored to your board"); }
+  else if (act === "deleteAccount") deleteAccount(el);
+  else if (act === "usePostcode") {
+    if (!postcodeOf(p.postcode)) { toast("Add your postcode in Profile first"); return; }
+    var loc = document.querySelector('[data-p="location"]'); loc.value = p.postcode; saveProfile({ location: p.postcode }, "critState"); renderBoard();
+  }
+  else if (act === "watch") {
+    var w = WATCHLIST.filter(function (x) { return x[0] === id; })[0]; if (!w) return;
+    var have = S.sites.filter(function (x) { return x.url === w[2]; })[0];
+    if (have) { await sb.from("sites").delete().eq("id", have.id); S.sites = S.sites.filter(function (x) { return x.id !== have.id; }); }
+    else { var ins = await sb.from("sites").insert({ name: w[1], url: w[2] }).select().single(); if (ins.error) { toast("Couldn’t add that site"); return; } S.sites.push(ins.data); toast("Added. It’s included from the next check."); }
+    renderSettings();
+  }
   else if (act === "siteAdd") {
     var raw = $("siteUrl").value.trim(), u = null;
     if (raw && !/^https?:\/\//i.test(raw)) raw = "https://" + raw;
@@ -433,15 +518,19 @@ document.addEventListener("click", async function (ev) {
     if (!u || !/\./.test(u.hostname)) { toast("Paste the full address of the vacancies page"); return; }
     var res = await sb.from("sites").insert({ name: ($("siteName").value.trim() || u.hostname.replace(/^www\./, "")).slice(0, 60), url: u.href }).select().single();
     if (res.error) { toast("Couldn’t add that site"); return; }
-    S.sites.push(res.data); $("siteName").value = ""; $("siteUrl").value = ""; renderSettings(); toast("Added. It’s included from the next check.");
+    S.sites.push(res.data); $("siteName").value = ""; $("siteUrl").value = ""; renderSettings(); toast("Added. Checking the page can be read…"); testSite(res.data.url);
   }
   else if (act === "siteRemove") { await sb.from("sites").delete().eq("id", id); S.sites = S.sites.filter(function (s) { return s.id !== id; }); renderSettings(); }
 });
+document.addEventListener("toggle", function (ev) {
+  var el = ev.target; if (el.dataset && el.dataset.notes) ui.openNotes[el.dataset.notes] = el.open;
+}, true);
 document.addEventListener("input", function (ev) {
   var el = ev.target;
+  if (el.dataset && el.dataset.m) { saveMatch(el.dataset.id, el.dataset.m, el.type === "date" ? (el.value || null) : el.value); return; }
   if (el.id === "q") { ui.q = el.value; renderBoard(); return; }
   if (!el.dataset || !el.dataset.p || !S.profile) return;
-  var patch = {}; patch[el.dataset.p] = el.type === "checkbox" ? el.checked : (el.dataset.num ? Number(el.value) : el.value);
+  var patch = {}; patch[el.dataset.p] = el.type === "checkbox" ? el.checked : (el.dataset.num ? (Math.round(Number(String(el.value).replace(/[^\d.]/g, ""))) || 0) : el.value);
   saveProfile(patch, el.dataset.note || "saveState");
   if (el.dataset.p === "full_name") renderBoard();
   if (el.dataset.p === "postcode") { clearTimeout(saveT.geo); saveT.geo = setTimeout(function () { loadGeo(); renderBoard(); }, 900); }
