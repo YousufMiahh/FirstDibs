@@ -25,7 +25,7 @@ var PROMPT_LIMIT = 13000; // Claude Desktop cuts prefilled prompts at roughly 14
 var CFG = window.FIRST_DIBS || {};
 var sb = null, user = null;
 var S = { profile: null, matches: [], sites: [], status: null };
-var ui = { tab: "board", view: "new", checking: false, authMode: "in", sort: "posted", level: "", within: "", q: "", recover: false, openNotes: {} };
+var ui = { tab: "board", view: "new", checking: false, authMode: "in", sort: "posted", level: "", within: "", q: "", recover: false, openNotes: {}, openJd: {} };
 var GEO = {}; // postcode -> [lat, lon], or null when it can’t be found
 
 /* ---------- helpers ---------- */
@@ -50,6 +50,36 @@ function closing(iso) {
 var toastT;
 function toast(msg) { var t = $("toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(function () { t.hidden = true; }, 3800); }
 function show(id, on) { $(id).hidden = !on; }
+
+/* ---------- job descriptions ---------- */
+// Same tidy-up as the scraper, so descriptions saved before it look clean too.
+function tidyDesc(text) {
+  var lines = String(text || "").split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
+  var nav = lines.indexOf("Apply now");
+  if (nav > -1 && nav < 30) lines = lines.slice(nav + 1);
+  var stop = -1;
+  for (var i = 0; i < lines.length; i++) { if (/^(ask a question|report this vacancy|support links|company benefits disclaimer|apply now)$/i.test(lines[i])) { stop = i; break; } }
+  if (stop > 0) lines = lines.slice(0, stop);
+  var out = [], skipping = false;
+  lines.forEach(function (l) {
+    if (/^(course contents|what you.ll learn)$/i.test(l)) { skipping = true; return; }
+    if (skipping && /^(training schedule|more training information|requirements|about this employer|after this apprenticeship)$/i.test(l)) skipping = false;
+    if (skipping || /\(opens in new tab\)$/i.test(l) || /^print$/i.test(l)) return;
+    out.push(l);
+  });
+  return out;
+}
+var JD_SECTIONS = /^(summary|work|training|requirements|about this employer|after this apprenticeship)$/i;
+var JD_LABELS = /^(wage|training course|hours|start date|duration|positions available|what you.ll do at work|where you.ll work|training provider|training schedule|more training information|essential qualifications|desirable qualifications|skills|other requirements|things to consider|company benefits|employer|contact|website|after this apprenticeship)$/i;
+function descHtml(text) {
+  var lines = tidyDesc(text);
+  if (!lines.length) return "";
+  return lines.map(function (l) {
+    if (JD_SECTIONS.test(l)) return "<h4>" + esc(l) + "</h4>";
+    if (JD_LABELS.test(l)) return '<p class="jd-label">' + esc(l) + "</p>";
+    return "<p>" + esc(l) + "</p>";
+  }).join("");
+}
 
 /* ---------- postcodes, distance and pay ---------- */
 var PC = /\b([A-Z]{1,2}\d[A-Z\d]?)\s*(\d[A-Z]{2})\b/i;
@@ -281,7 +311,8 @@ function buildPrompt(l) {
   var notes = p.notes ? "\n\nOTHER TRUE FACTS ABOUT ME\n" + p.notes.slice(0, 1200) : "";
   var name = p.full_name ? "\n\nMy name: " + p.full_name : "";
   var room = PROMPT_LIMIT - head.length - cv.length - notes.length - name.length - 40;
-  var jd = l.description && room > 300 ? "\n\nJOB DESCRIPTION\n" + l.description.slice(0, room) : "\n\nI couldn’t include the job description. Read it from the listing link if you can, or ask me to paste it.";
+  var jdText = tidyDesc(l.description).join("\n");
+  var jd = jdText && room > 300 ? "\n\nJOB DESCRIPTION\n" + jdText.slice(0, room) : "\n\nI couldn’t include the job description. Read it from the listing link if you can, or ask me to paste it.";
   return head + name + cv + notes + jd;
 }
 async function copyText(text) {
@@ -422,6 +453,8 @@ function renderBoard() {
       '<ul class="facts">' + (m.sector && label(SECTORS, m.sector) ? '<li class="tag" style="--h:' + ((m.sector * 47 + 215) % 360) + '">' + esc(label(SECTORS, m.sector)) + "</li>" : "") + (l.level ? "<li>Level " + l.level + "</li>" : "") + (l.course ? "<li>" + esc(l.course) + "</li>" : "") + (l.wage ? "<li>" + esc(l.wage) + "</li>" : "") + (far ? '<li class="far">' + far + "</li>" : "") +
       (c ? '<li class="' + (c.soon ? "soon" : "") + '">' + esc(c.text) + "</li>" : "") + (l.posted ? "<li>Posted " + esc(new Date(l.posted + "T12:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short" })) + "</li>" : "") +
       (st ? '<li class="st">' + esc(st) + "</li>" : "") + "</ul>" +
+      (l.description ? '<details class="jd" data-jd="' + esc(l.id) + '"' + (ui.openJd[l.id] ? " open" : "") + "><summary>Job details</summary>" +
+        (ui.openJd[l.id] ? '<div class="jd-body">' + descHtml(l.description) + "</div>" : "") + "</details>" : "") +
       '<div class="row"><button class="btn go" data-act="apply" data-id="' + esc(l.id) + '">Apply with Claude</button>' +
       '<a class="btn" href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer" data-act="seen" data-id="' + esc(l.id) + '">Open listing</a>' +
       '<button class="btn star" data-act="star" data-id="' + esc(l.id) + '" aria-pressed="' + (m.status === "shortlisted" ? "true" : "false") + '">' + (m.status === "shortlisted" ? "Shortlisted" : "Shortlist") + "</button>" +
@@ -524,6 +557,13 @@ document.addEventListener("click", async function (ev) {
 });
 document.addEventListener("toggle", function (ev) {
   var el = ev.target; if (el.dataset && el.dataset.notes) ui.openNotes[el.dataset.notes] = el.open;
+  if (el.dataset && el.dataset.jd) {
+    var id = el.dataset.jd; ui.openJd[id] = el.open;
+    if (el.open && !el.querySelector(".jd-body")) {
+      var m = S.matches.filter(function (x) { return x.listing_id === id; })[0];
+      if (m) { var div = document.createElement("div"); div.className = "jd-body"; div.innerHTML = descHtml(m.listing.description) || "<p>No description was saved for this vacancy. Open the listing to read it.</p>"; el.appendChild(div); }
+    }
+  }
 }, true);
 document.addEventListener("input", function (ev) {
   var el = ev.target;
