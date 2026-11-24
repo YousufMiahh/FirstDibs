@@ -37,11 +37,11 @@ async function sha(text) {
   const buf = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(text));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 20);
 }
-async function getPage(url) {
+async function getPage(url, accept) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), 20000);
   try {
-    const res = await fetch(url, { headers: { "User-Agent": UA, "Accept": "text/html" }, signal: ctl.signal, redirect: "follow" });
+    const res = await fetch(url, { headers: { "User-Agent": UA, "Accept": accept || "text/html" }, signal: ctl.signal, redirect: "follow" });
     if (!res.ok) throw new Error("HTTP " + res.status);
     return await res.text();
   } finally { clearTimeout(t); }
@@ -131,6 +131,81 @@ export function parseLinks(html, base) {
     out.push({ url: u.href, text });
   }
   return out;
+}
+
+/* ---------- sitemaps: for sites whose pages build their vacancy lists with JavaScript ---------- */
+// A link that looks like one vacancy: its last path segment is a slug of 3+ words, or it has a long id and a real title.
+function looksLikeVacancyLink(l) {
+  let path = "";
+  try { path = new URL(l.url).pathname; } catch (_) { return false; }
+  const segs = path.split("/").filter(Boolean);
+  // Vacancies sit at least two levels deep, and not under search, category or information sections.
+  if (segs.length < 2 || /^(search|schemes?|reviews?|blog|news|advice|articles?|guides?|about|help|faqs?|terms|privacy|cookies?|categor|tags?|locations?|companies|employers)/i.test(segs[0])) return false;
+  const last = segs[segs.length - 1] || "";
+  const words = last.split(/[-_]+/).filter((w) => /[a-z]{2,}/i.test(w));
+  return words.length >= 3 || (/\d{4,}/.test(path) && l.text.split(/\s+/).length >= 2);
+}
+function baseDomain(host) { return host.replace(/^www\./, "").split(".").slice(-3).join(".").replace(/^[^.]+\.(?=[^.]+\.(co|org|gov|ac)\.uk$)/, ""); }
+function sameSite(a, b) { const x = a.replace(/^www\./, ""), y = b.replace(/^www\./, ""); return x === y || x.endsWith("." + y) || y.endsWith("." + x) || baseDomain(x) === baseDomain(y); }
+// "/jobs/47419/qa-limited/it-support-level-3-apprenticeship-acme" -> "It support level 3 apprenticeship acme"
+function titleFromUrl(u) {
+  let seg = "";
+  try { seg = decodeURIComponent(new URL(u).pathname.split("/").filter(Boolean).pop() || ""); } catch (_) { return ""; }
+  seg = seg.replace(/\.(html?|aspx?|php)$/i, "").replace(/[-_]?(AW|VAC|ID)?\d{5,}$/i, "");
+  const t = seg.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : "";
+}
+async function sitemapUrls(pageUrl, trail = []) {
+  const page = new URL(pageUrl);
+  let start = [];
+  try {
+    const robots = await getPage(page.origin + "/robots.txt", "text/plain, */*");
+    start = Array.from(robots.matchAll(/^\s*sitemap:\s*(\S+)/gim)).map((m) => m[1]);
+  } catch (_) { /* no robots.txt */ }
+  if (!start.length) start = [page.origin + "/sitemap.xml"];
+  const urls = [], queue = start.slice(0, 3), seen = {};
+  trail.push("robots: " + (start.join(" ") || "none"));
+  let files = 0;
+  while (queue.length && files < 6) {
+    const sm = queue.shift();
+    if (seen[sm]) continue; seen[sm] = 1;
+    let host = "";
+    try { host = new URL(sm).hostname; } catch (_) { continue; }
+    if (!sameSite(host, page.hostname)) { trail.push("skipped other site " + host); continue; }
+    let xml = "";
+    try { xml = await getPage(sm, "application/xml, text/xml, */*"); files++; } catch (e) { trail.push("failed " + sm.slice(0, 70) + ": " + String(e.message || e).slice(0, 40)); continue; }
+    const locs = Array.from(xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)).map((m) => decode(m[1]));
+    trail.push(sm.replace(/^https?:\/\//, "").slice(0, 70) + ": " + locs.length + " entries");
+    const isIndex = /<(\w+:)?sitemapindex[\s>]/i.test(xml) || /<(\w+:)?sitemap>/i.test(xml) || (locs.length > 0 && locs.every((u) => /\.xml(\?|$)/i.test(u)));
+    if (isIndex) {
+      const kids = locs.filter((u) => /job|vacanc|apprentic|career|role|position/i.test(u));
+      (kids.length ? kids : locs).slice(0, 4).forEach((u) => queue.push(u));
+    } else {
+      for (const u of locs) urls.push(u);
+    }
+  }
+  // Keep the vacancies: prefer ones under the page's own path, then ones that mention apprenticeships, then any job pages.
+  const prefix = page.pathname.replace(/\/+$/, "");
+  const under = prefix.length > 1 ? urls.filter((u) => { try { return new URL(u).pathname.startsWith(prefix + "/"); } catch (_) { return false; } }) : [];
+  const appr = urls.filter((u) => /apprentic/i.test(u));
+  const jobs = urls.filter((u) => /\/(jobs?|vacanc[a-z]*|apprenticeships?|roles?|positions?)\//i.test(u));
+  const pick = under.length >= 10 ? under : appr.length >= 10 ? appr : jobs;
+  return pick.slice(0, 5000).map((u) => ({ url: u, text: titleFromUrl(u) })).filter((l) => l.text.length >= 8);
+}
+// Read a site's vacancy links: from the page when it has real vacancy links, otherwise from the site's sitemap.
+async function readSite(site) {
+  let links = [], pageError = null;
+  try { links = parseLinks(await getPage(site.url), site.url); } catch (e) { pageError = e; }
+  if (site.feed) return { links: await sitemapUrls(site.url), via: "sitemap", switched: false };
+  if (site.feed === "" && !pageError) return { links, via: "page", switched: false };
+  const vacancyLinks = links.filter(looksLikeVacancyLink).length;
+  // Only fall back when the page has no vacancy links at all, so one odd response can't switch a working site over.
+  if (vacancyLinks > 0) return { links, via: "page", switched: false, feed: "", vacancyLinks };
+  let mapError = null; const trail = [];
+  const fromMap = await sitemapUrls(site.url, trail).catch((e) => { mapError = String(e.message || e).slice(0, 80); return []; });
+  if (fromMap.length >= 10) return { links: fromMap, via: "sitemap", switched: true, feed: "sitemap", vacancyLinks };
+  if (pageError) throw pageError;
+  return { links, via: "page", switched: false, feed: "", vacancyLinks, sitemapFound: fromMap.length, mapError, trail };
 }
 
 /* ---------- matching ---------- */
@@ -289,9 +364,9 @@ async function probe(url) {
   try { u = new URL(String(url || "")); } catch (_) { return { ok: false, error: "That isn’t a full web address." }; }
   if (!/^https?:$/.test(u.protocol) || /^(localhost|127\.|10\.|192\.168\.|169\.254\.|\[)/i.test(u.hostname) || !u.hostname.includes(".")) return { ok: false, error: "That address can’t be checked." };
   try {
-    const links = parseLinks(await getPage(u.href), u.href);
-    const jobs = links.filter((l) => /apprentic|trainee|vacanc|job|role|position|engineer|technician|assistant|analyst|developer/i.test(l.text));
-    return { ok: true, count: links.length, sample: jobs.slice(0, 4).map((l) => l.text.slice(0, 80)) };
+    const read = await readSite({ url: u.href, feed: null });
+    const jobs = read.via === "sitemap" ? read.links : read.links.filter((l) => /apprentic|trainee|vacanc|job|role|position|engineer|technician|assistant|analyst|developer/i.test(l.text));
+    return { ok: true, count: read.links.length, via: read.via, vacancyLinks: read.vacancyLinks, sitemapFound: read.sitemapFound, mapError: read.mapError, trail: read.trail, sample: jobs.slice(0, 4).map((l) => l.text.slice(0, 80)) };
   } catch (e) { return { ok: false, error: "The page couldn’t be opened (" + String(e.message || e).slice(0, 60) + ")." }; }
 }
 
@@ -339,17 +414,27 @@ async function run(db, onlyUser) {
   await pool(sites || [], 3, async (site) => {
     const patch = { last_checked: new Date().toISOString(), last_error: null, last_count: 0 };
     try {
-      const links = parseLinks(await getPage(site.url), site.url);
+      const read = await readSite(site);
+      const links = read.links;
+      if (read.feed !== undefined) patch.feed = read.feed;
+      // The first read of a sitemap is silent: it lists every existing vacancy, which isn't news.
+      const silent = read.via === "sitemap" && (read.switched || !site.baselined);
       patch.last_count = links.length;
-      const { data: known } = await db.from("site_links").select("url").eq("site_id", site.id);
-      const have = new Set((known || []).map((k) => k.url));
+      const have = new Set();
+      for (let from = 0; ; from += 1000) {   // the database returns at most 1,000 rows per request
+        const { data: known } = await db.from("site_links").select("url").eq("site_id", site.id).range(from, from + 999);
+        (known || []).forEach((k) => have.add(k.url));
+        if (!known || known.length < 1000) break;
+      }
       const fresh = links.filter((l) => !have.has(l.url));
-      if (fresh.length) await db.from("site_links").upsert(fresh.map((l) => ({ site_id: site.id, url: l.url })), { onConflict: "site_id,url", ignoreDuplicates: true });
+      for (let i = 0; i < fresh.length; i += 500) {
+        await db.from("site_links").upsert(fresh.slice(i, i + 500).map((l) => ({ site_id: site.id, url: l.url })), { onConflict: "site_id,url", ignoreDuplicates: true });
+      }
       // First visit: only surface links that plainly are apprenticeships. After that: anything new.
       const owner = (profiles || []).find((p) => p.id === site.user_id) || {};
       const pathOf = (u) => { try { return decodeURIComponent(new URL(u).pathname).replace(/[-_/]+/g, " "); } catch (_) { return ""; } };
       const looksLikeVacancy = (l) => /apprentic|trainee|vacanc|job|role|position/i.test(l.text + " " + pathOf(l.url));
-      const report = fresh
+      const report = silent ? [] : fresh
         .filter((l) => site.baselined || looksLikeVacancy(l))
         .filter((l) => sectorFits(l.text + " " + pathOf(l.url), owner.sectors || []))
         .filter((l) => fits({ title: l.text, course: pathOf(l.url), employer: "", level: null }, { levels: [], keywords: owner.keywords || "" }));
@@ -359,7 +444,7 @@ async function run(db, onlyUser) {
         wanted.push({ user_id: site.user_id, listing_id: id, sector: null });
       }
       patch.baselined = true;
-      if (!links.length) patch.last_error = "No links found. The page may load its vacancies with JavaScript, which can't be read.";
+      if (!links.length) patch.last_error = "No vacancies found. The page loads them with JavaScript and the site has no usable sitemap, so it can't be read.";
     } catch (e) { patch.last_error = "Couldn't open the page (" + String(e.message || e).slice(0, 80) + ")"; }
     await db.from("sites").update(patch).eq("id", site.id);
   });
