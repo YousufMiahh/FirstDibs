@@ -262,7 +262,8 @@ async function testSite(url) {
   var res = await sb.functions.invoke("scrape", { body: { action: "probe", url: url } });
   var d = res.data || {};
   if (res.error || !d.ok) return toast("Added, but " + (d.error ? d.error.charAt(0).toLowerCase() + d.error.slice(1) : "the page couldn’t be checked."));
-  if (!d.count) return toast("Added, but no links were found. That page probably loads its vacancies with JavaScript, which can’t be read.");
+  if (!d.count) return toast("Added, but no vacancies were found. The page loads them with JavaScript and the site has no usable sitemap.");
+  if (d.via === "sitemap") return toast("Added. The page itself can’t be read, so its sitemap will be used instead: " + d.count + " vacancies listed.");
   toast("Added. The page can be read: " + d.count + " links found.");
 }
 async function checkNow() {
@@ -497,7 +498,8 @@ function renderSettings() {
     "</p><p>Always on. Searched by your categories and location, newest first.</p></div></div>";
   $("siteList").innerHTML = faa + S.sites.map(function (s) {
     var line = !s.last_checked ? "Not checked yet. It’s included from the next check." :
-      s.last_error ? esc(s.last_error) : "Checked " + esc(ago(s.last_checked)) + ". " + (s.last_count || 0) + " links on the page; you’re told when a new one appears.";
+      s.last_error ? esc(s.last_error) : s.feed === "sitemap" ? "Checked " + esc(ago(s.last_checked)) + " through the site’s sitemap: " + (s.last_count || 0) + " vacancies listed. You’re told when a new one matches." :
+      "Checked " + esc(ago(s.last_checked)) + ". " + (s.last_count || 0) + " links on the page; you’re told when a new one appears.";
     return '<div class="switch"><div style="min-width:0"><h3>' + esc(s.name) + '</h3><p class="url">' + esc(s.url) + "</p><p>" + line + "</p>" +
       '<div class="row" style="margin-top:6px"><button class="btn" data-act="siteRemove" data-id="' + esc(s.id) + '">Remove</button></div></div>' +
       '<input type="checkbox" data-site="' + esc(s.id) + '"' + (s.enabled ? " checked" : "") + ' aria-label="Check ' + esc(s.name) + '"></div>';
