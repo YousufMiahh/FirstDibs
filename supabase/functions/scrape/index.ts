@@ -99,6 +99,7 @@ export function parseDescription(html) {
 }
 
 /* ---------- any other site: watch a page for new links ---------- */
+const JUNK = /^(home|about|contact|log ?in|sign ?in|sign out|register|privacy|cookie|change (your )?cookie|terms|accessibility|skip to|next|previous|back|map view|list view|email me|how to|help|faq|search|filter|sort|view all|show more|load more|menu|share|print|feedback|report)\b/i;
 export function parseLinks(html, base) {
   const re = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   const host = new URL(base).hostname, out = [], seen = {};
@@ -110,7 +111,7 @@ export function parseLinks(html, base) {
     u.hash = "";
     const text = toLines(m[2]).join(" ").slice(0, 180);
     if (text.length < 8 || seen[u.href] || u.href === base) continue;
-    if (/^(home|about|contact|log ?in|sign ?in|register|privacy|cookies?|terms|accessibility|skip to|next|previous|back)\b/i.test(text)) continue;
+    if (JUNK.test(text) || /\/(cookies?|privacy|terms|accessibility|login|sign-?in|register|form)[\/-]?/i.test(u.pathname)) continue;
     seen[u.href] = 1;
     out.push({ url: u.href, text });
   }
@@ -118,6 +119,30 @@ export function parseLinks(html, base) {
 }
 
 /* ---------- matching ---------- */
+// Words that place a vacancy from an added site into one of the job categories.
+const SECTOR_WORDS = {
+  1: ["agricultur", "farm", "animal", "horticultur", "garden", "landscap", "forestry", "environment", "veterinar", "groundskeep", "equine"],
+  2: ["business admin", "administrat", "admin ", "office", "receptionist", "hr ", "human resources", "project", "customer service", "operations", "team leader", "data entry"],
+  3: ["care ", "carer", "care worker", "support worker", "residential", "social care", "health and social", "health & social", "wellbeing", "domiciliary", "nursing home"],
+  4: ["chef", "catering", "hospitality", "kitchen", "commis", "hotel", "restaurant", "barista", "food", "front of house"],
+  5: ["construction", "bricklay", "carpent", "joiner", "plumb", "electrician", "electrical install", "plaster", "roofer", "scaffold", "groundwork", "surveyor", "civil engineer", "site manager", "painter", "decorat", "heating", "gas engineer"],
+  6: ["creative", "design", "media", "content", "video", "photograph", "graphic", "broadcast", "journalis", "games art", "animation"],
+  7: ["digital", "ict", "it ", "it-", "software", "developer", "programm", "coding", "data", "cyber", "network", "infrastructure", "technician", "technology", "tech ", "computing", "cloud", "devops", "web ", "systems", "1st line", "2nd line", "service desk", "help desk", "helpdesk"],
+  8: ["teaching", "teacher", "classroom", "school", "childcare", "early years", "nursery", "education", "learning support", "play worker"],
+  9: ["engineer", "manufactur", "mechanic", "mechanical", "electrical", "maintenance", "fabricat", "welder", "welding", "machinist", "cnc", "toolmak", "production", "automotive", "motor vehicle", "aerospace"],
+  10: [" hair", "barber", "beauty", "nail", "salon", "spa ", "cosmetolog"],
+  11: ["health", "nhs", "clinical", "pharmacy", "dental", "laborator", "science", "scientist", "nursing", "healthcare", "physiotherap", "optical"],
+  12: ["legal", "law", "solicitor", "paralegal", "finance", "accounting", "accounts", "accountant", "payroll", "bookkeep", "audit", "tax", "banking", "insurance"],
+  13: ["police", " fire", "security", "armed forces", "army", "navy", "raf", "prison", "custodial", "emergency"],
+  14: ["sales", "marketing", "retail", "social media", "business development", "advertis", "seo", "pr ", "public relations", "account executive", "merchandis"],
+  15: ["transport", "logistics", "warehouse", "driver", "driving", "hgv", "lgv", "supply chain", " rail", "aviation", "freight", "courier", "fleet", " port "],
+};
+export function sectorFits(text, sectors) {
+  if (!sectors || !sectors.length) return true;
+  const hay = " " + String(text || "").toLowerCase().replace(/[^a-z0-9&]+/g, " ") + " ";
+  const pattern = (w) => (w.length <= 3 && !w.includes(" ")) ? " " + w + " " : (w.endsWith(" ") && !w.startsWith(" ")) ? " " + w : w;
+  return sectors.some((id) => (SECTOR_WORDS[id] || []).some((w) => hay.includes(pattern(w))));
+}
 export function fits(listing, profile) {
   const levels = profile.levels || [];
   if (levels.length && listing.level && !levels.includes(listing.level)) return false;
@@ -218,7 +243,13 @@ async function run(db, onlyUser) {
       const fresh = links.filter((l) => !have.has(l.url));
       if (fresh.length) await db.from("site_links").upsert(fresh.map((l) => ({ site_id: site.id, url: l.url })), { onConflict: "site_id,url", ignoreDuplicates: true });
       // First visit: only surface links that plainly are apprenticeships. After that: anything new.
-      const report = site.baselined ? fresh : fresh.filter((l) => /apprentice/i.test(l.text + " " + l.url));
+      const owner = (profiles || []).find((p) => p.id === site.user_id) || {};
+      const pathOf = (u) => { try { return decodeURIComponent(new URL(u).pathname).replace(/[-_/]+/g, " "); } catch (_) { return ""; } };
+      const looksLikeVacancy = (l) => /apprentic|trainee|vacanc|job|role|position/i.test(l.text + " " + pathOf(l.url));
+      const report = fresh
+        .filter((l) => site.baselined || looksLikeVacancy(l))
+        .filter((l) => sectorFits(l.text + " " + pathOf(l.url), owner.sectors || []))
+        .filter((l) => fits({ title: l.text, course: pathOf(l.url), employer: "", level: null }, { levels: [], keywords: owner.keywords || "" }));
       for (const l of report.slice(0, 25)) {
         const id = "web:" + (await sha(l.url));
         listings.set(id, { id, source: site.name, title: l.text, employer: site.name, location: "", course: "", level: null, wage: "", closes: null, posted: null, url: l.url });
