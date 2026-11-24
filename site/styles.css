@@ -117,6 +117,14 @@ textarea{min-height:100px;resize:vertical;line-height:1.45}
 .star[aria-pressed=true]{background:var(--tint);border-color:var(--brand);color:var(--brand)}
 .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 
+/* Sort and filter bar */
+.tools{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+.tools input[type=search]{grid-column:1 / -1;width:100%;background:var(--surface);border:1.5px solid var(--line);border-radius:14px;padding:11px 14px}
+.tools select{background-color:var(--surface);border:1.5px solid var(--line);font-size:14px;font-weight:600;padding:10px 12px}
+.tools #sortSel{grid-column:1 / -1}
+@media (min-width:720px){.tools{grid-template-columns:1.6fr 1fr 1fr 1fr}.tools input[type=search],.tools #sortSel{grid-column:auto}}
+.facts li.far{background:var(--tint);color:var(--brand)}
+
 /* Vacancy cards */
 .card{background:var(--surface);border:1px solid var(--line);border-radius:22px;padding:16px 18px;margin-bottom:14px;box-shadow:var(--shadow);position:relative;overflow:hidden}
 .card.fresh{border-color:transparent;background:linear-gradient(var(--surface),var(--surface)) padding-box,var(--grad) border-box;border:2px solid transparent}

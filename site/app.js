@@ -13,7 +13,8 @@ var PROMPT_LIMIT = 13000; // Claude Desktop cuts prefilled prompts at roughly 14
 var CFG = window.FIRST_DIBS || {};
 var sb = null, user = null;
 var S = { profile: null, matches: [], sites: [], status: null };
-var ui = { tab: "board", view: "new", checking: false, authMode: "in" };
+var ui = { tab: "board", view: "new", checking: false, authMode: "in", sort: "posted", level: "", within: "", q: "" };
+var GEO = {}; // postcode -> [lat, lon], or null when it can’t be found
 
 /* ---------- helpers ---------- */
 function $(id) { return document.getElementById(id); }
@@ -37,6 +38,43 @@ function closing(iso) {
 var toastT;
 function toast(msg) { var t = $("toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(function () { t.hidden = true; }, 3800); }
 function show(id, on) { $(id).hidden = !on; }
+
+/* ---------- postcodes, distance and pay ---------- */
+var PC = /\b([A-Z]{1,2}\d[A-Z\d]?)\s*(\d[A-Z]{2})\b/i;
+function postcodeOf(text) { var m = PC.exec(String(text || "")); return m ? (m[1] + m[2]).toUpperCase() : ""; }
+function validPostcode(text) { return /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i.test(String(text || "").trim()); }
+function milesBetween(a, b) {
+  var R = 3958.8, rad = Math.PI / 180, dLat = (b[0] - a[0]) * rad, dLon = (b[1] - a[1]) * rad;
+  var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(a[0] * rad) * Math.cos(b[0] * rad) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function distanceTo(l) {
+  var home = GEO[postcodeOf(S.profile && S.profile.postcode)], there = GEO[postcodeOf(l.location)];
+  return home && there ? milesBetween(home, there) : null;
+}
+// Yearly pay as a number, from text like "£24,000 a year", "£15,600 to £18,000 a year" or "£7.55 an hour".
+function payOf(text) {
+  var m = /£\s*([\d,]+(?:\.\d+)?)/.exec(String(text || "")); if (!m) return null;
+  var v = parseFloat(m[1].replace(/,/g, "")); if (!isFinite(v)) return null;
+  if (/hour/i.test(text)) v *= 37.5 * 52; else if (/week/i.test(text)) v *= 52; else if (/month/i.test(text)) v *= 12;
+  return v;
+}
+// Look up any postcodes we haven't seen yet (free postcodes.io service), then redraw.
+async function loadGeo() {
+  try { var saved = JSON.parse(localStorage.getItem("fd-geo") || "{}"); Object.keys(saved).forEach(function (k) { if (!(k in GEO)) GEO[k] = saved[k]; }); } catch (e) {}
+  var want = {}; var home = postcodeOf(S.profile && S.profile.postcode); if (home) want[home] = 1;
+  S.matches.forEach(function (m) { var pc = postcodeOf(m.listing.location); if (pc) want[pc] = 1; });
+  var need = Object.keys(want).filter(function (k) { return !(k in GEO); });
+  for (var i = 0; i < need.length; i += 100) {
+    try {
+      var res = await fetch("https://api.postcodes.io/postcodes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ postcodes: need.slice(i, i + 100) }) });
+      var data = await res.json();
+      (data.result || []).forEach(function (r) { GEO[String(r.query).replace(/\s+/g, "").toUpperCase()] = r.result ? [r.result.latitude, r.result.longitude] : null; });
+    } catch (e) { break; }
+  }
+  try { localStorage.setItem("fd-geo", JSON.stringify(GEO)); } catch (e) {}
+  if (need.length) renderBoard();
+}
 
 /* ---------- auth ---------- */
 async function boot() {
@@ -66,6 +104,7 @@ function setAuthMode(mode) {
   $("authTitle").textContent = up ? "Create your account" : "Sign in";
   $("authBtn").textContent = up ? "Create account" : "Sign in";
   $("nameField").hidden = !up;
+  $("postcodeField").hidden = !up;
   $("passHint").hidden = !up;
   $("authPass").setAttribute("autocomplete", up ? "new-password" : "current-password");
   $("authSwitch").innerHTML = up ? 'Already have an account? <button type="button" data-act="authMode">Sign in</button>'
@@ -76,15 +115,17 @@ function setAuthMode(mode) {
 async function authGo() {
   var up = ui.authMode === "up";
   var name = $("authName").value.trim().replace(/\s+/g, " ");
+  var postcode = $("authPostcode").value.trim().toUpperCase().replace(/\s+/g, " ");
   var email = $("authEmail").value.trim(), pass = $("authPass").value, msg = $("authMsg");
   msg.className = "state"; msg.textContent = "";
   function bad(t) { msg.className = "state bad"; msg.textContent = t; }
   if (up && name.length < 2) return bad("Enter your full name.");
+  if (up && !validPostcode(postcode)) return bad("Enter a full UK postcode, like TN34 1AA.");
   if (!/^\S+@\S+\.\S+$/.test(email)) return bad("Enter your email address.");
   if (pass.length < 8) return bad("Use a password of at least 8 characters.");
   msg.textContent = up ? "Creating your account…" : "Signing in…";
   var res = up
-    ? await sb.auth.signUp({ email: email, password: pass, options: { data: { full_name: name } } })
+    ? await sb.auth.signUp({ email: email, password: pass, options: { data: { full_name: name, postcode: postcode } } })
     : await sb.auth.signInWithPassword({ email: email, password: pass });
   if (res.error) return bad(res.error.message);
   if (up && !res.data.session) { msg.textContent = "Account created. Confirm it from the email we sent, then sign in."; setAuthMode("in"); return; }
@@ -99,11 +140,10 @@ async function loadAll() {
   if (!p.data) { await sb.from("profiles").insert({ id: uid, email: user.email }); p = await sb.from("profiles").select("*").eq("id", uid).maybeSingle(); }
   if (p.error || !p.data) { toast("Couldn’t load your profile. Has the database setup script been run?"); return; }
   S.profile = p.data;
-  var metaName = user.user_metadata && user.user_metadata.full_name;
-  if (!S.profile.full_name && metaName) {
-    S.profile.full_name = String(metaName).slice(0, 120);
-    await sb.from("profiles").update({ full_name: S.profile.full_name }).eq("id", uid);
-  }
+  var meta = user.user_metadata || {}, fill = {};
+  if (!S.profile.full_name && meta.full_name) fill.full_name = String(meta.full_name).slice(0, 120);
+  if (!S.profile.postcode && meta.postcode && "postcode" in S.profile) fill.postcode = String(meta.postcode).slice(0, 10);
+  if (Object.keys(fill).length) { Object.keys(fill).forEach(function (k) { S.profile[k] = fill[k]; }); await sb.from("profiles").update(fill).eq("id", uid); }
   var r = await Promise.all([
     sb.from("matches").select("*, listing:listings(*)").eq("user_id", uid).order("created_at", { ascending: false }).limit(400),
     sb.from("sites").select("*").order("created_at"),
@@ -113,6 +153,7 @@ async function loadAll() {
   S.sites = r[1].data || [];
   S.status = r[2].data || null;
   fillForms(); render();
+  loadGeo();
 }
 var saveT = {};
 function saveProfile(patch, note) {
@@ -254,12 +295,29 @@ function renderChrome() {
   btn.disabled = ui.checking; btn.textContent = ui.checking ? "Checking…" : "Check now";
 }
 function visible() {
-  return S.matches.filter(function (m) {
+  var q = ui.q.trim().toLowerCase(), within = Number(ui.within) || 0, level = Number(ui.level) || 0;
+  var rows = S.matches.filter(function (m) {
+    var l = m.listing;
     if (m.status === "hidden") return false;
-    if (ui.view === "new") return m.status === "new";
-    if (ui.view === "short") return ["shortlisted", "applied", "interview", "offer"].indexOf(m.status) > -1;
+    if (ui.view === "new" && m.status !== "new") return false;
+    if (ui.view === "short" && ["shortlisted", "applied", "interview", "offer"].indexOf(m.status) < 0) return false;
+    if (level && l.level !== level) return false;
+    if (q && (l.title + " " + l.employer + " " + l.location + " " + l.course).toLowerCase().indexOf(q) < 0) return false;
+    if (within) { var d = distanceTo(l); if (d === null || d > within) return false; }
     return true;
   });
+  // Unknown values (no pay stated, no postcode) always go to the bottom.
+  function by(get, dir) { return function (a, b) { var x = get(a), y = get(b); if (x === null && y === null) return 0; if (x === null) return 1; if (y === null) return -1; return x < y ? -dir : x > y ? dir : 0; }; }
+  var spotted = by(function (m) { return m.created_at; }, -1);
+  var sorters = {
+    posted: by(function (m) { return m.listing.posted || null; }, -1),
+    salary: by(function (m) { return payOf(m.listing.wage); }, -1),
+    distance: by(function (m) { return distanceTo(m.listing); }, 1),
+    closing: by(function (m) { return m.listing.closes || null; }, 1),
+    spotted: spotted
+  };
+  var main = sorters[ui.sort] || spotted;
+  return rows.sort(function (a, b) { return main(a, b) || spotted(a, b); });
 }
 function renderBoard() {
   var p = S.profile || {};
@@ -279,18 +337,24 @@ function renderBoard() {
   var names = (p.sectors || []).map(function (s) { return label(SECTORS, s); }).filter(Boolean);
   $("searchSum").textContent = names.length ? names.join(", ") + (p.location ? " within " + p.distance + " miles of " + p.location : " across England") : "You haven’t picked any categories yet.";
   var ls = visible(), el = $("list");
+  var hasHome = !!postcodeOf(p.postcode), usesDistance = ui.sort === "distance" || !!ui.within;
+  var note = usesDistance && !hasHome ? "Add your postcode in Profile to sort and filter by distance."
+    : usesDistance && hasHome && GEO[postcodeOf(p.postcode)] === null ? "We couldn’t find your postcode. Check it in Profile."
+    : (ui.q || ui.level || ui.within) ? ls.length + (ls.length === 1 ? " vacancy matches" : " vacancies match") + " your filters." : "";
+  var tn = $("toolNote"); if (tn) tn.textContent = note;
   if (!ls.length) {
     el.innerHTML = '<div class="empty"><strong>' + (S.matches.length ? "Nothing in this view" : "No matches yet") + "</strong>" +
-      (S.matches.length ? "Switch to Everything to see the rest." : (names.length ? "Press Check now, or wait for the next scheduled check." : "Pick your categories in Settings, then press Check now.")) + "</div>";
+      (S.matches.length ? ((ui.q || ui.level || ui.within) ? "Clear the search and filters, or switch to Everything." : "Switch to Everything to see the rest.") : (names.length ? "Press Check now, or wait for the next scheduled check." : "Pick your categories in Settings, then press Check now.")) + "</div>";
     return;
   }
   el.innerHTML = ls.map(function (m) {
     var l = m.listing, c = closing(l.closes), fresh = m.status === "new", st = label(STATUSES, m.status);
+    var d = distanceTo(l), far = d === null ? "" : (d < 1 ? "Under a mile away" : Math.round(d) + (Math.round(d) === 1 ? " mile away" : " miles away"));
     return '<article class="card' + (fresh ? " fresh" : "") + '">' +
       '<p class="spot"><b><i></i>' + (fresh ? "New, spotted " : "Spotted ") + esc(ago(m.created_at)) + "</b><span>" + esc(l.source || "") + "</span></p>" +
       "<h3>" + esc(l.title) + "</h3>" +
       '<p class="who"><strong>' + esc(l.employer || "") + "</strong>" + (l.location ? ", " + esc(l.location) : "") + "</p>" +
-      '<ul class="facts">' + (m.sector && label(SECTORS, m.sector) ? '<li class="tag" style="--h:' + ((m.sector * 47 + 215) % 360) + '">' + esc(label(SECTORS, m.sector)) + "</li>" : "") + (l.level ? "<li>Level " + l.level + "</li>" : "") + (l.course ? "<li>" + esc(l.course) + "</li>" : "") + (l.wage ? "<li>" + esc(l.wage) + "</li>" : "") +
+      '<ul class="facts">' + (m.sector && label(SECTORS, m.sector) ? '<li class="tag" style="--h:' + ((m.sector * 47 + 215) % 360) + '">' + esc(label(SECTORS, m.sector)) + "</li>" : "") + (l.level ? "<li>Level " + l.level + "</li>" : "") + (l.course ? "<li>" + esc(l.course) + "</li>" : "") + (l.wage ? "<li>" + esc(l.wage) + "</li>" : "") + (far ? '<li class="far">' + far + "</li>" : "") +
       (c ? '<li class="' + (c.soon ? "soon" : "") + '">' + esc(c.text) + "</li>" : "") + (l.posted ? "<li>Posted " + esc(new Date(l.posted + "T12:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short" })) + "</li>" : "") +
       (st ? '<li class="st">' + esc(st) + "</li>" : "") + "</ul>" +
       '<div class="row"><button class="btn go" data-act="apply" data-id="' + esc(l.id) + '">Apply with Claude</button>' +
@@ -374,22 +438,28 @@ document.addEventListener("click", async function (ev) {
   else if (act === "siteRemove") { await sb.from("sites").delete().eq("id", id); S.sites = S.sites.filter(function (s) { return s.id !== id; }); renderSettings(); }
 });
 document.addEventListener("input", function (ev) {
-  var el = ev.target; if (!el.dataset || !el.dataset.p || !S.profile) return;
+  var el = ev.target;
+  if (el.id === "q") { ui.q = el.value; renderBoard(); return; }
+  if (!el.dataset || !el.dataset.p || !S.profile) return;
   var patch = {}; patch[el.dataset.p] = el.type === "checkbox" ? el.checked : (el.dataset.num ? Number(el.value) : el.value);
   saveProfile(patch, el.dataset.note || "saveState");
   if (el.dataset.p === "full_name") renderBoard();
+  if (el.dataset.p === "postcode") { clearTimeout(saveT.geo); saveT.geo = setTimeout(function () { loadGeo(); renderBoard(); }, 900); }
   if (el.dataset.note === "critState") renderBoard();
 });
 document.addEventListener("change", async function (ev) {
   var el = ev.target;
   if (el.id === "cvFile") { if (el.files && el.files[0]) readCV(el.files[0]); el.value = ""; return; }
+  if (el.id === "sortSel") { ui.sort = el.value; renderBoard(); return; }
+  if (el.id === "levelSel") { ui.level = el.value; renderBoard(); return; }
+  if (el.id === "withinSel") { ui.within = el.value; renderBoard(); return; }
   if (el.dataset && el.dataset.status) { setStatus(el.dataset.status, el.value); return; }
   if (el.dataset && el.dataset.site) {
     S.sites.forEach(function (s) { if (s.id === el.dataset.site) s.enabled = el.checked; });
     await sb.from("sites").update({ enabled: el.checked }).eq("id", el.dataset.site);
   }
 });
-document.addEventListener("keydown", function (ev) { if (ev.key === "Enter" && /^auth(Name|Email|Pass)$/.test(ev.target.id)) authGo(); });
+document.addEventListener("keydown", function (ev) { if (ev.key === "Enter" && /^auth(Name|Postcode|Email|Pass)$/.test(ev.target.id)) authGo(); });
 setInterval(function () { if (user && S.profile) renderChrome(); }, 60000);
 boot();
 })();

@@ -25,6 +25,7 @@
   <div class="panel">
     <h3 id="authTitle">Sign in</h3>
     <label class="field" id="nameField" hidden><span>Full name</span><input type="text" id="authName" autocomplete="name"></label>
+    <label class="field" id="postcodeField" hidden><span>Postcode</span><input type="text" id="authPostcode" autocomplete="postal-code" autocapitalize="characters" placeholder="e.g. TN34 1AA"><small>Used to show how far each vacancy is from you.</small></label>
     <label class="field"><span>Email</span><input type="email" id="authEmail" autocomplete="email"></label>
     <label class="field"><span>Password</span><input type="password" id="authPass" autocomplete="current-password"><small id="passHint" hidden>At least 8 characters.</small></label>
     <div class="row" style="margin-top:16px"><button class="btn go" id="authBtn" data-act="authGo">Sign in</button></div>
@@ -62,7 +63,24 @@
         <li><b id="stNew">0</b>New</li><li><b id="stShort">0</b>Shortlisted</li><li><b id="stApplied">0</b>Applied</li><li><b id="stClosing">0</b>Closing this week</li>
       </ul>
     </div>
-    <div class="chips" id="viewChips" style="margin-bottom:14px"></div>
+    <div class="chips" id="viewChips" style="margin-bottom:12px"></div>
+    <div class="tools">
+      <input type="search" id="q" placeholder="Search title or employer" aria-label="Search title or employer">
+      <select id="sortSel" aria-label="Sort by">
+        <option value="posted">Newest posted</option>
+        <option value="salary">Highest salary</option>
+        <option value="distance">Closest to me</option>
+        <option value="closing">Closing soonest</option>
+        <option value="spotted">Recently spotted</option>
+      </select>
+      <select id="levelSel" aria-label="Level">
+        <option value="">Any level</option><option value="2">Level 2</option><option value="3">Level 3</option><option value="4">Level 4</option><option value="5">Level 5</option><option value="6">Level 6</option><option value="7">Level 7</option>
+      </select>
+      <select id="withinSel" aria-label="Distance">
+        <option value="">Any distance</option><option value="10">Within 10 miles</option><option value="25">Within 25 miles</option><option value="50">Within 50 miles</option><option value="100">Within 100 miles</option>
+      </select>
+    </div>
+    <p class="state" id="toolNote" style="margin:0 2px 12px" aria-live="polite"></p>
     <div id="list"></div>
   </section>
 
@@ -78,6 +96,8 @@
     <p class="lede">“Apply with Claude” sends your CV and these notes to Claude along with the job description. Claude is told to use only what’s here.</p>
     <div class="panel">
       <label class="field" style="margin-top:0"><span>Your name</span><input type="text" data-p="full_name" autocomplete="name"></label>
+      <label class="field"><span>Your postcode</span><input type="text" data-p="postcode" autocomplete="postal-code" autocapitalize="characters" placeholder="e.g. TN34 1AA">
+        <small>Used to show how far each vacancy is from you, and to sort by distance. It isn’t shared with employers.</small></label>
       <div class="field"><span>Your CV</span>
         <div class="row"><label class="btn" for="cvFile">Upload your CV</label><input class="vh" type="file" id="cvFile" accept=".pdf,.docx,.txt,.md,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"><span class="state" id="cvState"></span></div>
         <small>PDF, Word (.docx) or plain text. The text is kept below so you can fix anything that came out wrong.</small>
