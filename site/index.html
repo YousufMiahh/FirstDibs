@@ -23,11 +23,14 @@
   <h1 class="mark">First Dibs</h1>
   <p class="lede">New apprenticeships in your sectors, emailed to you as they’re posted.</p>
   <div class="panel">
-    <label class="field" style="margin-top:0"><span>Email</span><input type="email" id="authEmail" autocomplete="email"></label>
-    <label class="field"><span>Password</span><input type="password" id="authPass" autocomplete="current-password"></label>
-    <div class="row" style="margin-top:14px"><button class="btn go" data-act="signin">Sign in</button><button class="btn" data-act="signup">Create account</button></div>
+    <h3 id="authTitle">Sign in</h3>
+    <label class="field" id="nameField" hidden><span>Full name</span><input type="text" id="authName" autocomplete="name"></label>
+    <label class="field"><span>Email</span><input type="email" id="authEmail" autocomplete="email"></label>
+    <label class="field"><span>Password</span><input type="password" id="authPass" autocomplete="current-password"><small id="passHint" hidden>At least 8 characters.</small></label>
+    <div class="row" style="margin-top:16px"><button class="btn go" id="authBtn" data-act="authGo">Sign in</button></div>
     <p class="state" id="authMsg" style="margin:10px 0 0" aria-live="polite"></p>
   </div>
+  <p class="auth-switch" id="authSwitch"></p>
 </div>
 
 <!-- The app -->
@@ -50,6 +53,7 @@
   <section id="tab-board">
     <div class="hero">
       <p class="eyebrow">Your search</p>
+      <p class="hello" id="hello" hidden></p>
       <h2 id="heroLine">Your board</h2>
       <p class="lede" id="searchSum"></p>
       <div class="row"><button class="btn go" id="checkBtn" data-act="check">Check now</button><button class="btn" data-act="goSettings">Change criteria</button></div>
@@ -108,7 +112,7 @@
     </div>
 
     <h2 style="margin-top:22px">Sites it checks</h2>
-    <p class="lede">The scraper reads these every 15 minutes, whether or not you have this page open.</p>
+    <p class="lede">The scraper reads these every 2 hours, whether or not you have this page open.</p>
     <div class="panel">
       <div id="siteList"></div>
       <div class="field"><span>Add a site</span>

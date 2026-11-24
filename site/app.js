@@ -13,7 +13,7 @@ var PROMPT_LIMIT = 13000; // Claude Desktop cuts prefilled prompts at roughly 14
 var CFG = window.FIRST_DIBS || {};
 var sb = null, user = null;
 var S = { profile: null, matches: [], sites: [], status: null };
-var ui = { tab: "board", view: "new", checking: false };
+var ui = { tab: "board", view: "new", checking: false, authMode: "in" };
 
 /* ---------- helpers ---------- */
 function $(id) { return document.getElementById(id); }
@@ -54,23 +54,43 @@ async function boot() {
 async function enter(u) {
   user = u;
   show("auth", !u); show("app", !!u);
-  if (!u) return;
+  if (!u) { setAuthMode(ui.authMode); return; }
   $("whoami").textContent = u.email || "";
   await loadAll();
   var p = S.profile;
   if (p && !(p.sectors || []).length) { setTab("settings"); toast("Pick what you’re after to get started"); }
 }
-async function authGo(mode) {
+function setAuthMode(mode) {
+  ui.authMode = mode;
+  var up = mode === "up";
+  $("authTitle").textContent = up ? "Create your account" : "Sign in";
+  $("authBtn").textContent = up ? "Create account" : "Sign in";
+  $("nameField").hidden = !up;
+  $("passHint").hidden = !up;
+  $("authPass").setAttribute("autocomplete", up ? "new-password" : "current-password");
+  $("authSwitch").innerHTML = up ? 'Already have an account? <button type="button" data-act="authMode">Sign in</button>'
+    : 'New here? <button type="button" data-act="authMode">Create an account</button>';
+  $("authMsg").className = "state"; $("authMsg").textContent = "";
+  (up ? $("authName") : $("authEmail")).focus();
+}
+async function authGo() {
+  var up = ui.authMode === "up";
+  var name = $("authName").value.trim().replace(/\s+/g, " ");
   var email = $("authEmail").value.trim(), pass = $("authPass").value, msg = $("authMsg");
   msg.className = "state"; msg.textContent = "";
-  if (!/^\S+@\S+\.\S+$/.test(email)) { msg.className = "state bad"; msg.textContent = "Enter your email address."; return; }
-  if (pass.length < 8) { msg.className = "state bad"; msg.textContent = "Use a password of at least 8 characters."; return; }
-  msg.textContent = mode === "up" ? "Creating your account…" : "Signing in…";
-  var res = mode === "up" ? await sb.auth.signUp({ email: email, password: pass }) : await sb.auth.signInWithPassword({ email: email, password: pass });
-  if (res.error) { msg.className = "state bad"; msg.textContent = res.error.message; return; }
-  if (mode === "up" && !res.data.session) { msg.textContent = "Account created. Confirm it from the email we sent, then sign in."; return; }
+  function bad(t) { msg.className = "state bad"; msg.textContent = t; }
+  if (up && name.length < 2) return bad("Enter your full name.");
+  if (!/^\S+@\S+\.\S+$/.test(email)) return bad("Enter your email address.");
+  if (pass.length < 8) return bad("Use a password of at least 8 characters.");
+  msg.textContent = up ? "Creating your account…" : "Signing in…";
+  var res = up
+    ? await sb.auth.signUp({ email: email, password: pass, options: { data: { full_name: name } } })
+    : await sb.auth.signInWithPassword({ email: email, password: pass });
+  if (res.error) return bad(res.error.message);
+  if (up && !res.data.session) { msg.textContent = "Account created. Confirm it from the email we sent, then sign in."; setAuthMode("in"); return; }
   msg.textContent = "";
 }
+function firstName() { return String((S.profile && S.profile.full_name) || "").trim().split(/\s+/)[0] || ""; }
 
 /* ---------- data ---------- */
 async function loadAll() {
@@ -79,6 +99,11 @@ async function loadAll() {
   if (!p.data) { await sb.from("profiles").insert({ id: uid, email: user.email }); p = await sb.from("profiles").select("*").eq("id", uid).maybeSingle(); }
   if (p.error || !p.data) { toast("Couldn’t load your profile. Has the database setup script been run?"); return; }
   S.profile = p.data;
+  var metaName = user.user_metadata && user.user_metadata.full_name;
+  if (!S.profile.full_name && metaName) {
+    S.profile.full_name = String(metaName).slice(0, 120);
+    await sb.from("profiles").update({ full_name: S.profile.full_name }).eq("id", uid);
+  }
   var r = await Promise.all([
     sb.from("matches").select("*, listing:listings(*)").eq("user_id", uid).order("created_at", { ascending: false }).limit(400),
     sb.from("sites").select("*").order("created_at"),
@@ -111,8 +136,13 @@ async function checkNow() {
   ui.checking = true; renderChrome();
   var res = await sb.functions.invoke("scrape", { body: {} });
   ui.checking = false;
+  var why = res.data && res.data.error;
+  if (res.error && !why) {
+    why = res.error.message || "";
+    try { var b = await res.error.context.json(); if (b && b.error) why = b.error; } catch (e) {}
+  }
   if (res.error || (res.data && res.data.error)) {
-    $("progress").textContent = "The check didn’t run. Make sure the scrape function is deployed. (" + ((res.data && res.data.error) || res.error.message || "").slice(0, 120) + ")";
+    $("progress").textContent = "The check didn’t run: " + String(why || "unknown error").slice(0, 160);
   } else {
     var d = res.data || {};
     $("progress").textContent = (d.fresh ? d.fresh + " new for you." : "Nothing new since the last check.") + " " + (d.found || 0) + " vacancies read." + (d.error ? " Note: " + d.error : "");
@@ -128,7 +158,7 @@ function buildPrompt(l) {
   var head = [
     "I’m applying for the apprenticeship below. Please do all of this in one reply.",
     "Rules: use only facts from my CV and notes. Never invent a qualification, grade, employer, date or experience; if the job asks for something I don’t have, leave it out. Write in UK English, in my voice, plain and confident.",
-    "1. My CV tailored to this role. Keep its DNA: the same sections in the same order, my way of phrasing things, every fact unchanged. Rewrite the opening profile for this job, put the most relevant points first, mirror the job description’s wording where my experience really matches, and cut what’s irrelevant.",
+    "1. My CV tailored to this role, as a downloadable PDF file. Keep its DNA: the same sections in the same order, my way of phrasing things, every fact unchanged. Rewrite the opening profile for this job, put the most relevant points first, mirror the job description’s wording where my experience really matches, and cut what’s irrelevant. Lay the PDF out on A4 in a clean single column, my name and contact details at the top, no photo or graphics, two pages at most, and name the file with my name and the employer. If you can’t create files, give the CV as plain text instead.",
     "2. My answer to “What are your skills and strengths?” (130 to 170 words).",
     "3. My answer to “What interests you about this apprenticeship?” (130 to 170 words).",
     "4. A cover letter (180 to 230 words).",
@@ -243,7 +273,8 @@ function renderBoard() {
   put("stShort", live.filter(function (m) { return m.status === "shortlisted"; }).length);
   put("stApplied", live.filter(function (m) { return ["applied", "interview", "offer"].indexOf(m.status) > -1; }).length);
   put("stClosing", live.filter(function (m) { var c = closing(m.listing.closes); return c && c.soon && !/^Closed/.test(c.text); }).length);
-  put("heroLine", newCount ? newCount + " new apprenticeship" + (newCount > 1 ? "s" : "") + " for you" : (S.matches.length ? "You’re up to date" : "Let’s find your first match"));
+  var hello = $("hello"); if (hello) { var fn = firstName(); hello.textContent = fn ? "Hello, " + fn : ""; hello.hidden = !fn; }
+  put("heroLine", newCount ? newCount + " new apprenticeship" + (newCount > 1 ? "s" : "") + " found for you" : (S.matches.length ? "You’re up to date" : "Let’s find your first match"));
   chipRow($("viewChips"), [["new", "New"], ["all", "Everything"], ["short", "Shortlist"]], function (id) { return ui.view === id; }, "view");
   var names = (p.sectors || []).map(function (s) { return label(SECTORS, s); }).filter(Boolean);
   $("searchSum").textContent = names.length ? names.join(", ") + (p.location ? " within " + p.distance + " miles of " + p.location : " across England") : "You haven’t picked any categories yet.";
@@ -317,8 +348,8 @@ document.addEventListener("click", async function (ev) {
   var tab = ev.target.closest("nav.tabs button"); if (tab) { setTab(tab.dataset.tab); return; }
   var el = ev.target.closest("[data-act]"); if (!el) return;
   var act = el.dataset.act, id = el.dataset.id, p = S.profile;
-  if (act === "signin") authGo("in");
-  else if (act === "signup") authGo("up");
+  if (act === "authGo") authGo();
+  else if (act === "authMode") setAuthMode(ui.authMode === "up" ? "in" : "up");
   else if (act === "signout") { await sb.auth.signOut(); }
   else if (act === "check") checkNow();
   else if (act === "goSettings") setTab("settings");
@@ -346,6 +377,7 @@ document.addEventListener("input", function (ev) {
   var el = ev.target; if (!el.dataset || !el.dataset.p || !S.profile) return;
   var patch = {}; patch[el.dataset.p] = el.type === "checkbox" ? el.checked : (el.dataset.num ? Number(el.value) : el.value);
   saveProfile(patch, el.dataset.note || "saveState");
+  if (el.dataset.p === "full_name") renderBoard();
   if (el.dataset.note === "critState") renderBoard();
 });
 document.addEventListener("change", async function (ev) {
@@ -357,7 +389,7 @@ document.addEventListener("change", async function (ev) {
     await sb.from("sites").update({ enabled: el.checked }).eq("id", el.dataset.site);
   }
 });
-document.addEventListener("keydown", function (ev) { if (ev.key === "Enter" && ev.target.id === "authPass") authGo("in"); });
+document.addEventListener("keydown", function (ev) { if (ev.key === "Enter" && /^auth(Name|Email|Pass)$/.test(ev.target.id)) authGo(); });
 setInterval(function () { if (user && S.profile) renderChrome(); }, 60000);
 boot();
 })();
