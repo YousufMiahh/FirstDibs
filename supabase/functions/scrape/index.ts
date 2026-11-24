@@ -93,9 +93,24 @@ export function parseFaa(html) {
 }
 export function parseDescription(html) {
   const main = /<main\b[\s\S]*?<\/main>/i.exec(html);
-  const lines = toLines(main ? main[0] : html);
-  const stop = lines.findIndex((l) => /^(report this vacancy|support links|company benefits disclaimer)/i.test(l));
-  return (stop > 0 ? lines.slice(0, stop) : lines).join("\n").slice(0, 7000);
+  let lines = toLines(main ? main[0] : html);
+  // Skip the page header and contents list: the real text starts at the "Summary" heading after "Apply now".
+  const nav = lines.indexOf("Apply now");
+  if (nav > -1 && nav < 30) lines = lines.slice(nav + 1);
+  // Stop before the page footer.
+  const stop = lines.findIndex((l) => /^(ask a question|report this vacancy|support links|company benefits disclaimer|apply now)$/i.test(l));
+  if (stop > 0) lines = lines.slice(0, stop);
+  // Drop the training course's generic skills list ("Course contents"); it isn't written by the employer.
+  const out = [];
+  let skipping = false;
+  for (const l of lines) {
+    if (/^(course contents|what you.ll learn)$/i.test(l)) { skipping = true; continue; }
+    if (skipping && /^(training schedule|more training information|requirements|about this employer|after this apprenticeship)$/i.test(l)) skipping = false;
+    if (skipping) continue;
+    if (/\(opens in new tab\)$/i.test(l) || /^print$/i.test(l)) continue;
+    out.push(l);
+  }
+  return out.join("\n").slice(0, 7000);
 }
 
 /* ---------- any other site: watch a page for new links ---------- */
@@ -143,9 +158,20 @@ export function sectorFits(text, sectors) {
   const pattern = (w) => (w.length <= 3 && !w.includes(" ")) ? " " + w + " " : (w.endsWith(" ") && !w.startsWith(" ")) ? " " + w : w;
   return sectors.some((id) => (SECTOR_WORDS[id] || []).some((w) => hay.includes(pattern(w))));
 }
+// Yearly pay as a number, from "£24,000 a year", "£15,600 to £18,000 a year" or "£7.55 an hour". Null when not stated.
+export function payOf(text) {
+  const m = /£\s*([\d,]+(?:\.\d+)?)/.exec(String(text || ""));
+  if (!m) return null;
+  let v = parseFloat(m[1].replace(/,/g, ""));
+  if (!isFinite(v)) return null;
+  if (/hour/i.test(text)) v *= 37.5 * 52; else if (/week/i.test(text)) v *= 52; else if (/month/i.test(text)) v *= 12;
+  return v;
+}
 export function fits(listing, profile) {
   const levels = profile.levels || [];
   if (levels.length && listing.level && !levels.includes(listing.level)) return false;
+  const min = Number(profile.min_salary) || 0;
+  if (min) { const pay = payOf(listing.wage); if (pay !== null && pay < min) return false; }  // unstated pay is let through
   const words = String(profile.keywords || "").toLowerCase().split(",").map((w) => w.trim()).filter(Boolean);
   if (!words.length) return true;
   const hay = (listing.title + " " + listing.course + " " + listing.employer).toLowerCase();
@@ -190,6 +216,83 @@ function buildEmail(rows) {
     '<p style="color:#56617F;font-size:13px">You’re getting this because email alerts are on in your First Dibs settings.</p></div>';
   const text = items.map((x) => x.l.title + "\n" + x.facts.join(", ") + "\n" + x.l.url).join("\n\n") + (site ? "\n\nOpen First Dibs: " + site : "");
   return { subject, html, text };
+}
+
+function wrapEmail(inner) {
+  const site = Deno.env.get("SITE_URL") || "";
+  return '<div style="font-family:Arial,sans-serif;font-size:15px;color:#0F1B3D;max-width:560px">' + inner +
+    (site ? '<p><a href="' + esc(site) + '" style="color:#2440E6">Open First Dibs</a></p>' : "") +
+    '<p style="color:#56617F;font-size:13px">You can turn these emails off in your First Dibs settings.</p></div>';
+}
+function itemHtml(l, extra) {
+  return '<p style="margin:0 0 14px"><a href="' + esc(l.url) + '" style="color:#2440E6;font-weight:bold">' + esc(l.title) + "</a><br>" +
+    esc([l.employer, l.location, extra].filter(Boolean).join(", ")) + "</p>";
+}
+function daysUntil(iso) { return Math.round((Date.parse(iso + "T00:00:00Z") - Date.parse(dayOffset(0) + "T00:00:00Z")) / 86400000); }
+function closesIn(iso) { const n = daysUntil(iso); return n <= 0 ? "closes today" : n === 1 ? "closes tomorrow" : "closes in " + n + " days (" + niceDate(iso) + ")"; }
+
+// 1. Closing-soon reminders for shortlisted vacancies, once each, three days or less before they close.
+async function sendReminders(db, profiles, problems) {
+  const today = dayOffset(0), limit = dayOffset(3);
+  let sent = 0;
+  for (const p of profiles || []) {
+    if (!p.email || p.reminders === false) continue;
+    const { data } = await db.from("matches").select("listing_id, listing:listings(*)").eq("user_id", p.id).eq("status", "shortlisted").is("reminded_at", null);
+    const due = (data || []).filter((d) => d.listing && d.listing.closes && d.listing.closes >= today && d.listing.closes <= limit);
+    if (!due.length) continue;
+    due.sort((a, b) => a.listing.closes.localeCompare(b.listing.closes));
+    const subject = due.length === 1 ? "Closing soon: " + due[0].listing.title : due.length + " shortlisted apprenticeships close soon";
+    const html = wrapEmail("<p>" + (due.length === 1 ? "A vacancy on your shortlist is" : "Vacancies on your shortlist are") + " about to close.</p>" +
+      due.map((d) => itemHtml(d.listing, closesIn(d.listing.closes))).join(""));
+    const text = due.map((d) => d.listing.title + "\n" + [d.listing.employer, closesIn(d.listing.closes)].filter(Boolean).join(", ") + "\n" + d.listing.url).join("\n\n");
+    try {
+      await sendEmail(p.email, subject, html, text);
+      await db.from("matches").update({ reminded_at: new Date().toISOString() }).eq("user_id", p.id).in("listing_id", due.map((d) => d.listing_id));
+      sent++;
+    } catch (e) { problems.push(String(e.message || e).slice(0, 160)); }
+  }
+  return sent;
+}
+
+// Weekly summary, sent by the Monday schedule.
+async function weekly(db) {
+  const { data: profiles, error } = await db.from("profiles").select("*");
+  if (error) throw error;
+  const today = dayOffset(0), week = dayOffset(7), since = new Date(Date.now() - 7 * 86400000).toISOString();
+  let sent = 0; const problems = [];
+  for (const p of profiles || []) {
+    if (!p.email || p.weekly_summary === false) continue;
+    const { data } = await db.from("matches").select("status, created_at, interview_at, listing:listings(title,employer,location,closes,url)").eq("user_id", p.id).neq("status", "hidden");
+    const rows = (data || []).filter((m) => m.listing);
+    if (!rows.length) continue;
+    const count = (st) => rows.filter((m) => m.status === st).length;
+    const fresh = rows.filter((m) => m.created_at >= since).length;
+    const closing = rows.filter((m) => ["new", "seen", "shortlisted"].includes(m.status) && m.listing.closes && m.listing.closes >= today && m.listing.closes <= week)
+      .sort((a, b) => (a.status === "shortlisted" ? 0 : 1) - (b.status === "shortlisted" ? 0 : 1) || a.listing.closes.localeCompare(b.listing.closes)).slice(0, 8);
+    const interviews = rows.filter((m) => m.interview_at && m.interview_at >= today && m.interview_at <= week).sort((a, b) => a.interview_at.localeCompare(b.interview_at));
+    const first = String(p.full_name || "").trim().split(/\s+/)[0];
+    const stats = [fresh + " new this week", count("shortlisted") + " shortlisted", count("applied") + " applied", count("interview") + " at interview", count("offer") ? count("offer") + " offers" : ""].filter(Boolean);
+    const html = wrapEmail("<p>" + (first ? "Hello " + esc(first) + ". " : "") + "Here’s your week on First Dibs.</p>" +
+      '<p style="font-weight:bold">' + esc(stats.join(" · ")) + "</p>" +
+      (interviews.length ? '<h3 style="font-size:16px;margin:18px 0 8px">Interviews this week</h3>' + interviews.map((m) => itemHtml(m.listing, "interview on " + niceDate(m.interview_at))).join("") : "") +
+      (closing.length ? '<h3 style="font-size:16px;margin:18px 0 8px">Closing this week</h3>' + closing.map((m) => itemHtml(m.listing, closesIn(m.listing.closes) + (m.status === "shortlisted" ? ", on your shortlist" : ""))).join("") : "<p>Nothing on your board closes this week.</p>"));
+    const text = stats.join(", ") + "\n\n" + (closing.length ? "Closing this week:\n" + closing.map((m) => m.listing.title + " (" + closesIn(m.listing.closes) + ")\n" + m.listing.url).join("\n") : "Nothing on your board closes this week.");
+    try { await sendEmail(p.email, "Your First Dibs week: " + fresh + " new, " + closing.length + " closing soon", html, text); sent++; }
+    catch (e) { problems.push(String(e.message || e).slice(0, 160)); }
+  }
+  return { weekly: true, sent, error: problems.length ? problems.join("; ") : null };
+}
+
+// Read a page without saving anything, so the site can tell someone whether a page they add can be read.
+async function probe(url) {
+  let u;
+  try { u = new URL(String(url || "")); } catch (_) { return { ok: false, error: "That isn’t a full web address." }; }
+  if (!/^https?:$/.test(u.protocol) || /^(localhost|127\.|10\.|192\.168\.|169\.254\.|\[)/i.test(u.hostname) || !u.hostname.includes(".")) return { ok: false, error: "That address can’t be checked." };
+  try {
+    const links = parseLinks(await getPage(u.href), u.href);
+    const jobs = links.filter((l) => /apprentic|trainee|vacanc|job|role|position|engineer|technician|assistant|analyst|developer/i.test(l.text));
+    return { ok: true, count: links.length, sample: jobs.slice(0, 4).map((l) => l.text.slice(0, 80)) };
+  } catch (e) { return { ok: false, error: "The page couldn’t be opened (" + String(e.message || e).slice(0, 60) + ")." }; }
 }
 
 /* ---------- the run ---------- */
@@ -269,10 +372,20 @@ async function run(db, onlyUser) {
     (data || []).forEach((r) => existing.add(r.id));
   }
   const fresh = ids.filter((id) => !existing.has(id)).map((id) => listings.get(id));
-  await pool(fresh.filter((l) => l.id.startsWith("faa:")).slice(0, MAX_DETAILS), 4, async (l) => { l.description = parseDescription(await getPage(l.url)); });
+  await pool(fresh.filter((l) => l.id.startsWith("faa:")).slice(0, MAX_DETAILS), 4, async (l) => { l.description = parseDescription(await getPage(l.url)); l.desc_v = 2; });
   for (let i = 0; i < fresh.length; i += 100) {
     const { error } = await db.from("listings").upsert(fresh.slice(i, i + 100), { onConflict: "id", ignoreDuplicates: true });
     if (error) throw error;
+  }
+
+  // Re-read older job descriptions that were saved before the tidy-up (a few per scheduled run).
+  if (!onlyUser) {
+    const { data: old } = await db.from("listings").select("id,url").lt("desc_v", 2).like("id", "faa:%").limit(15);
+    await pool(old || [], 4, async (l) => {
+      let text = null;
+      try { text = parseDescription(await getPage(l.url)); } catch (_) { /* page gone: leave the old text */ }
+      await db.from("listings").update(text ? { description: text, desc_v: 2 } : { desc_v: 2 }).eq("id", l.id);
+    });
   }
 
   // 4. Record matches (one per user per vacancy; repeats are ignored)
@@ -300,9 +413,11 @@ async function run(db, onlyUser) {
     } catch (e) { problems.push(String(e.message || e).slice(0, 160)); }
   }
 
+  const reminded = await sendReminders(db, profiles, problems);
+
   const summary = { last_run: new Date().toISOString(), found: ids.length, fresh: added, error: problems.length ? problems.join("; ") : null };
   if (!onlyUser) await db.from("status").upsert({ id: 1, ...summary });
-  return { ...summary, emailed };
+  return { ...summary, emailed, reminded };
 }
 
 /* ---------- HTTP entry ---------- */
@@ -313,7 +428,9 @@ if (typeof Deno !== "undefined" && Deno.serve) {
   Deno.serve(async (req) => {
     if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
     const db = createClient(Deno.env.get("SUPABASE_URL"), Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"), { auth: { persistSession: false } });
-    let onlyUser = null;
+    let onlyUser = null, body = {};
+    try { body = (await req.json()) || {}; } catch (_) { body = {}; }
+    const action = String(body.action || "scrape");
     const secret = req.headers.get("x-cron-secret"), want = Deno.env.get("CRON_SECRET");
     if (!(secret && want && secret === want)) {
       const token = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
@@ -321,7 +438,17 @@ if (typeof Deno !== "undefined" && Deno.serve) {
       if (error || !data || !data.user) return reply({ error: "Sign in first" }, 401);
       onlyUser = data.user.id;
     }
-    try { return reply(await run(db, onlyUser)); }
+    try {
+      if (action === "weekly") return onlyUser ? reply({ error: "Not allowed" }, 403) : reply(await weekly(db));
+      if (action === "probe") return onlyUser ? reply(await probe(body.url)) : reply({ error: "Not allowed" }, 403);
+      if (action === "delete_account") {
+        if (!onlyUser) return reply({ error: "Not allowed" }, 403);
+        const { error } = await db.auth.admin.deleteUser(onlyUser);   // profile, matches and sites go with it
+        if (error) throw error;
+        return reply({ deleted: true });
+      }
+      return reply(await run(db, onlyUser));
+    }
     catch (e) {
       const msg = String((e && e.message) || e).slice(0, 300);
       if (!onlyUser) await db.from("status").upsert({ id: 1, last_run: new Date().toISOString(), error: msg });
