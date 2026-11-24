@@ -373,8 +373,10 @@ async function run(db, onlyUser) {
   }
   const fresh = ids.filter((id) => !existing.has(id)).map((id) => listings.get(id));
   await pool(fresh.filter((l) => l.id.startsWith("faa:")).slice(0, MAX_DETAILS), 4, async (l) => { l.description = parseDescription(await getPage(l.url)); l.desc_v = 2; });
-  for (let i = 0; i < fresh.length; i += 100) {
-    const { error } = await db.from("listings").upsert(fresh.slice(i, i + 100), { onConflict: "id", ignoreDuplicates: true });
+  // Give every row the same columns: in a mixed batch, a missing value is saved as null, which the table rejects.
+  const newListings = fresh.map((l) => ({ ...l, description: l.description || "", desc_v: l.desc_v || 1 }));
+  for (let i = 0; i < newListings.length; i += 100) {
+    const { error } = await db.from("listings").upsert(newListings.slice(i, i + 100), { onConflict: "id", ignoreDuplicates: true, defaultToNull: false });
     if (error) throw error;
   }
 
